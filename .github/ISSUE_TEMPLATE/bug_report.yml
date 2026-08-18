@@ -1,0 +1,27 @@
+name: Bug report
+description: Something broke or did not show up in game
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected to change in game, and what you actually saw.
+      placeholder: Dropped teef_004_u.ydd into mp_m_freemode_01, but the vest still shows the vanilla texture.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: texoverride.log
+      description: Paste the whole file. It lives next to texoverride.asi in the plugins folder and contains no personal information.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: FiveM game build and server pure level (if known)
+      placeholder: b3751, sv_pureLevel 0
+    validations:
+      required: false

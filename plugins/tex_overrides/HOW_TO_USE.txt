@@ -1,0 +1,29 @@
+tex_overrides — where your replacement clothing goes
+=====================================================
+
+Each subfolder here must be named EXACTLY after a GTA V freemode ped collection
+(the folder the game streams the component from). Drop your .ydd / .ytd files
+inside the matching folder.
+
+  tex_overrides/
+    mp_m_freemode_01/            <- base male freemode
+      teef_004_u.ydd            <- your replacement drawable
+      teef_diff_004_a_uni.ytd   <- your replacement texture
+    mp_f_freemode_01/           <- base female freemode
+      lowr_000_r.ydd
+
+Rules:
+  - Folder name = the EXACT collection name. See COLLECTIONS.md for all 186 valid
+    names. Anything not on that list is refused by the plugin's safety gate
+    (it only ever touches human freemode-ped slots — never story peds, animals,
+    vehicles, props, maps or scripts).
+  - Only .ydd (models) and .ytd (textures) are picked up.
+  - Matching is exact: collection folder + filename. If you're unsure which
+    collection an in-game item uses, check plugins/texoverride.log after a launch.
+
+Kill switch: create an empty file named  _OFF  (no extension) in this folder and
+relaunch — the plugin loads but changes nothing.
+
+The two example folders here (mp_m_freemode_01, mp_f_freemode_01) are empty
+placeholders. Delete the .keep files and drop your own components in, or make
+new folders for other collections from COLLECTIONS.md.

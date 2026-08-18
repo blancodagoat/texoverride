@@ -1,0 +1,2 @@
+# cmd cannot reliably parse batch files with LF-only endings
+*.bat text eol=crlf

@@ -1,0 +1,7 @@
+# build artifacts (attach the built .asi to a GitHub Release instead of committing it)
+*.asi
+*.obj
+*.res
+*.exp
+*.lib
+*.log
