@@ -99,8 +99,21 @@ file called `overlays.xml`. The plugin can change those numbers for you. Three s
 3. **Put the edited `.xml` into `tex_overrides`**, next to your `.ytd` files, and start the game.
 
 One file to leave alone: `shop_tattoo.meta`, which sits next to `overlays.xml` in the game files.
-It holds shop prices and unlocks, not looks, so the plugin does not read it. Everything about how
-a tattoo looks and where it sits is covered by the `.ytd` and the `overlays.xml`.
+It is the shop catalog (price, menu label, unlock, and which shop slot points to which tattoo),
+not the tattoo's looks or position. A useful thing to know: the game's own reader for that file
+has no field for `zone`, so a `<zone>` line inside `shop_tattoo.meta` is thrown away on load. The
+zone that actually places a tattoo, along with its size, angle and texture, lives in the `.ytd`
+and the `overlays.xml`. So when you replace or move a tattoo, nothing in `shop_tattoo.meta` needs
+to change, and the plugin does not apply it; if you drop one in anywhere, the log says it was
+ignored. If you keep it for your own reference, put it in a folder named after its pack
+(`tex_overrides/mplowrider/shop_tattoo.meta`), matching the game's own layout.
+
+A note on why that file has no pack name in it: the game connects each `shop_tattoo.meta` to its
+DLC through the DLC's own content list (`content.xml`), not through the file name. That is also
+the answer for *adding* whole new tattoos, where a shop entry does matter: a new tattoo needs its
+texture, overlay entry and shop entry loaded together as a pack. FiveM loads such packs client
+side as mod packages in `FiveM.app\mods` (this is how server tattoo packs are built). texoverride
+stays out of that; it replaces and moves what exists.
 
 The plugin is careful with these files. Before changing anything in the running game, it checks
 that the entries you did not touch still match the game exactly. If they do not line up, because

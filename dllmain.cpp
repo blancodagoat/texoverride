@@ -71,7 +71,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.4.0"
+#define TEXOVERRIDE_VERSION "0.4.1"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -125,6 +125,13 @@ static int scanDir(const std::string& base, const std::string& rel)
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) n += scanDir(base, childRel);
         else {
             std::string ln = lower(name);
+            // .meta (shop_tattoo.meta etc.) is shop data, not looks — not applied yet, but the
+            // pack-folder layout (tex_overrides/mplowrider/shop_tattoo.meta) is the reserved
+            // convention for it, so acknowledge the file instead of silently skipping it
+            if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
+                logf("IGNORED %s — .meta files hold shop data (prices/menus), not looks; see README", fwd(childRel).c_str());
+                continue;
+            }
             if (ln.size() > 4 && (ln.compare(ln.size()-4,4,".ytd")==0 || ln.compare(ln.size()-4,4,".ydd")==0)) {
                 std::string slotStr = lower(fwd(childRel));                    // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
                 // SAFETY GATE: folders must be freemode-ped collections; root files must be .ytd.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 (2026-08-19)
+
+- Dropped `.meta` files (like `shop_tattoo.meta`) now get an "ignored" line in the log instead of
+  silence, wherever they sit in `tex_overrides`. They hold shop data, not looks; the README
+  explains what to do instead, and reserves the pack-folder layout
+  (`tex_overrides/mplowrider/shop_tattoo.meta`) for them.
+
 ## 0.4.0 (2026-08-18)
 
 - Update check. At startup the plugin asks GitHub for the newest release number, and shows a
