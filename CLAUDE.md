@@ -85,12 +85,12 @@ Faults are SEH-shielded: a solve fault retires ONE collection (`placementSolve` 
 fault disables the whole feature (`placementBeatSafe`). Needs >=3 presets, most unedited. `joaat`
 is GTA's case-insensitive hash — verified against known hashes.
 
-## shop_tattoo.meta — researched, deliberately NOT applied
+## shop_tattoo.meta — researched, WILL NOT be built (settled 2026-08-19)
 
-Users may have `shop_tattoo.meta` (one per dlcpack, no dlc name in the filename). Decision: the
-plugin does NOT apply it; it just logs dropped `.meta` files as "ignored" (v0.4.1). Reserved
-convention if ever built: `tex_overrides/<packname>/shop_tattoo.meta` (folder = dlc indicator,
-mirroring the game's own path layout).
+Users may have `shop_tattoo.meta` (one per dlcpack, no dlc name in the filename). Final decision:
+the plugin does NOT apply it and never will; it just logs dropped `.meta` files as "ignored"
+(v0.4.1). The user confirmed on 2026-08-19 they do not care about it. Do not propose building it
+again. The research below is kept only so the "why" is not re-derived, not as a to-do.
 
 Why not applied (from GameSource + Rockstar's own .psc parser schema):
 - It's a DLC data file, `fileType TATTOO_SHOP_DLC_FILE`, declared in each pack's `content.xml`,
