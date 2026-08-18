@@ -98,6 +98,10 @@ file called `overlays.xml`. The plugin can change those numbers for you. Three s
    the angle. Only change the tattoos you want moved. Leave the rest of the file alone.
 3. **Put the edited `.xml` into `tex_overrides`**, next to your `.ytd` files, and start the game.
 
+One file to leave alone: `shop_tattoo.meta`, which sits next to `overlays.xml` in the game files.
+It holds shop prices and unlocks, not looks, so the plugin does not read it. Everything about how
+a tattoo looks and where it sits is covered by the `.ytd` and the `overlays.xml`.
+
 The plugin is careful with these files. Before changing anything in the running game, it checks
 that the entries you did not touch still match the game exactly. If they do not line up, because
 it is the wrong file or the game has updated, it changes nothing and says so in the log. This
