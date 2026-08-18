@@ -1,7 +1,8 @@
 # texoverride
 
 Client-side clothing and texture replacement for FiveM. Drop `.ydd` / `.ytd` files into a folder and
-your client draws them. No archive edits, no re-encryption, nothing sent to the server.
+your client draws them. It never edits or re-encrypts game archives, and it sends nothing to the
+server.
 
 It exists because FiveM's own client-side mod paths (the `mods/` folder, pseudo-DLC wrapping, caret
 naming) cannot deliver ped textures. They drain before the connect handshake, and the pseudo-DLC
@@ -14,7 +15,7 @@ slots.
 This is a working proof of concept. It has rendered replacement clothing correctly in live sessions,
 and it will still break in ways nobody has hit yet. When it does, the log is built to tell us why.
 
-Found one? [Open a bug report](../../issues/new/choose). The form asks for two things: what you
+When it breaks, [open a bug report](../../issues/new/choose). The form asks for two things: what you
 expected to happen, and the contents of `plugins/texoverride.log`. That is usually enough to fix it.
 
 The log is safe to paste publicly. Override paths are written relative to `tex_overrides/`, so it
@@ -53,7 +54,7 @@ Only `.ydd` (models) and `.ytd` (textures) are picked up. Only human freemode-pe
 ever touched: story peds, animals, vehicles, props, maps and scripts are refused by a safety gate in
 the code.
 
-Not sure which collection an item streams from? Launch once and read the log. It lists every
+If you are not sure which collection an item uses, launch once and read the log. It lists every
 collection the server requests, tagged with whether the plugin can reach it.
 
 ## Turning it off
