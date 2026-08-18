@@ -68,12 +68,14 @@ Everything goes to `plugins/texoverride.log`, wiped and rewritten on every launc
 
 | Line | What it tells you |
 |---|---|
-| `texoverride 0.1.0 loaded (date)` | The plugin is in and running |
+| `texoverride x.y.z loaded (date)` | The plugin is in and running |
 | `loaded N override(s)` | The folder scan found your files |
 | indented `collection N file(s)` lines | How your files were grouped per collection |
+| `streaming manager @ ...` | The streaming pool was found (re-assert needs this) |
 | `registerRawStreamingFile @ ...` | The hook target was found |
 | `MH_EnableHook: MH_OK` | The hook is live |
-| `OVERRIDE-REG slot <- file` | Your file now owns that slot |
+| `OVERRIDE-REG slot <- file` | Your file claimed that slot |
+| `RECLAIM slot (old -> ours)` | The game or server re-pointed a claimed slot; it was taken back |
 | `REDIRECT name -> file` | A streamed asset was swapped for your file |
 | `collection: name [tag]` | A collection the server streams, and whether it is reachable |
 | `alive (beat N) ...` | Heartbeat; the plugin survived this long |
@@ -93,9 +95,15 @@ trainers and `PackfileLimitAdjuster.asi` use, and it survives full connected ses
 
 Base freemode clothing lives inside `x64v.rpf` and never passes through that function, so waiting to
 intercept it would wait forever. Instead the plugin calls `registerRawStreamingFile` itself and
-registers your loose file under the base slot name. The archive copy loses to the newer
-registration, exactly the way a server `stream/` folder overrides a base asset. Streamed DLC
-collections do pass through the hook, so those are redirected on an exact `collection/file` match.
+registers your loose file under the base slot name. That claim alone is not enough: a streaming slot
+maps name → id → handle, and whoever writes the handle last owns the slot. Vanilla DLC mounts
+re-point claimed slots when they load, and FiveM's loader overwrites handles of already-registered
+slots directly, without calling the hooked function at all. So the plugin remembers the handle its
+claim produced and re-asserts it once a second: if anything re-pointed the slot, it writes its own
+handle back. Last writer wins, and the plugin is always the last writer. This is the same
+handle-overwrite mechanism Cfx's own override path uses in `LoadStreamingFile.cpp`; the plugin just
+repeats it. Streamed files that pass through the hook under a claimed name are also redirected to
+the local file on an exact `collection/file` match.
 
 The path handed to the game is a plain absolute path, which FiveM's VFS opens without complaint. The
 game reads the whole resource from your file (header, page flags, data), so there is no size or flag
@@ -139,8 +147,10 @@ plainly](#ban-risk-stated-plainly) below.
 
 ## Ban risk, stated plainly
 
-The total write to game memory is one inline hook of about five bytes on a cosmetic asset-routing
-function, plus MinHook's trampoline page. Nothing else is patched. The plugin never reads or writes
+The total write to game code is one inline hook of about five bytes on a cosmetic asset-routing
+function, plus MinHook's trampoline page. Beyond that the plugin writes data, not code: the handle
+words of its own claimed slots in the streaming info table, the same words Cfx's loader writes when
+a server overrides a file. Nothing else is touched. The plugin never reads or writes
 health, money, weapons, position, entity pools, network events or player state, so there is no
 gameplay advantage in it and nothing that changes what other players see.
 
@@ -188,6 +198,9 @@ binary attached.
 - Exact matching means you need the right collection name. Servers that re-stream clothing under
   their own custom DLC collections may not use the base collection for a given menu item. Trust the
   log over the base name.
+- A reclaim changes what loads next, not what is already on screen. If an item was visible at the
+  moment its slot was taken back (a server re-streamed it mid-session), take it off and put it back
+  on once.
 - Client-side only. Other players and the server see no difference.
 
 ## Files

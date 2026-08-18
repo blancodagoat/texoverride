@@ -1,13 +1,17 @@
-// texoverride — v7: proactive base override, with a freemode-ped safety gate
+// texoverride — v8: claim early, then re-assert (last writer wins)
 //
-// Base freemode components live inside x64v.rpf (RPF-resident), so they never pass through
-// registerRawStreamingFile — that function is only for loose/streamed files. To replace a base
-// component we do what a server stream/ folder does: register OUR loose file UNDER the base slot
-// name, so it overrides the x64v-resident one. The ASI calls registerRawStreamingFile itself for
-// each override, using the same flags a real call uses (captured live).
+// v7 registered each override under its base slot name via registerRawStreamingFile and assumed
+// the claim would stick. It never does: streaming slots are name -> id -> handle, and whoever
+// writes the HANDLE last owns the slot. Vanilla DLC mounts re-point claimed slots when they load
+// (that is why base luxe_02 props stayed vanilla), and FiveM's own loader, on seeing a slot whose
+// handle is already set, overwrites the handle directly without ever calling the function we hook
+// (that is why server clothes never redirected — redirects=0 forever). Server .ytd files bypass
+// the hooked function entirely (FiveM routes them to its own raw streamer via RegisterObject).
 //
-//   override at  tex_overrides\mp_m_freemode_01\teef_004_u.ydd
-//   -> registered as slot  "mp_m_freemode_01/teef_004_u.ydd"  reading from our file
+// So v8 does what FiveM's own override path does, but keeps doing it:
+//   1. claim: register our file under the slot name (creates the slot + a raw entry for our file,
+//      and remember Entries[id].handle — a durable ticket to our data)
+//   2. re-assert: once a second, if anything re-pointed Entries[id].handle, write ours back
 //
 // SAFETY: only human freemode-ped collections (mp_m_freemode_01*, mp_f_freemode_01*) are ever
 // touched. Anything else — animal peds, story/ambient peds, vehicles, weapons, props, maps,
@@ -30,12 +34,23 @@ static HINSTANCE g_self;
 static char g_logPath[MAX_PATH], g_overrideDir[MAX_PATH];
 static bool g_off = false;
 
-struct Ov { const char* slot; const char* file; };   // both persistent, forward-slash, lowercased
+struct Ov {
+    const char* slot; const char* file;   // both persistent, forward-slash, lowercased
+    uint32_t id = 0xFFFFFFFF;             // global streaming index our claim landed on
+    uint32_t handle = 0;                  // the handle value that points at OUR file
+};
 static std::vector<Ov> g_ovs;
 static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
 
-static volatile LONG g_regTotal = 0, g_redirects = 0;
+// rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
+// loader actually opens; layout from Cfx's gta-streaming-five/include/Streaming.h.
+struct StrEntry { uint32_t handle, flags; };
+struct StrMgr   { StrEntry* entries; char pad[16]; int numEntries; };
+static StrMgr* g_mgr = nullptr;
+
+static volatile LONG g_regTotal = 0, g_redirects = 0, g_idsReady = 0;
+static long g_reclaims = 0, g_deferred = 0;   // written by the heartbeat thread only
 static bool g_didRegister = false;
 static bool g_b1 = true, g_b2 = false, g_captured = false;
 static CRITICAL_SECTION g_cs;   // guards the one-time registration + the collection map (hook may run on >1 thread)
@@ -51,7 +66,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.1.0"
+#define TEXOVERRIDE_VERSION "0.2.0"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -110,7 +125,8 @@ static int scanDir(const std::string& base, const std::string& rel)
     return n;
 }
 
-static uint8_t* scanModule(const uint8_t* pat, size_t len)
+// pattern scan over the game module's executable sections; -1 in pat = wildcard byte
+static uint8_t* scanModule(const short* pat, size_t len)
 {
     HMODULE mod = GetModuleHandleA(nullptr);
     auto dos = (IMAGE_DOS_HEADER*)mod;
@@ -120,11 +136,17 @@ static uint8_t* scanModule(const uint8_t* pat, size_t len)
         if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
         uint8_t* b = (uint8_t*)mod + sec->VirtualAddress;
         size_t sz = sec->Misc.VirtualSize;
-        for (size_t j = 0; j + len <= sz; ++j)
-            if (memcmp(b + j, pat, len) == 0) return b + j;
+        for (size_t j = 0; j + len <= sz; ++j) {
+            size_t k = 0;
+            while (k < len && (pat[k] < 0 || b[j + k] == (uint8_t)pat[k])) ++k;
+            if (k == len) return b + j;
+        }
     }
     return nullptr;
 }
+
+// resolve a rip-relative disp32 (p points at the 4 displacement bytes)
+static uint8_t* ripTarget(uint8_t* p) { return p + 4 + *(int32_t*)p; }
 
 typedef uint32_t* (*RegRaw_t)(uint32_t*, const char*, bool, const char*, bool);
 static RegRaw_t o_regRaw = nullptr;
@@ -145,14 +167,25 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
         if (!g_off && !g_didRegister)
         {
             g_didRegister = true;
+            // the pool must exist by now (this very call registers into it); if it looks wrong,
+            // the manager pattern matched the wrong code — better no re-assert than a wild write
+            if (g_mgr && (!g_mgr->entries || g_mgr->numEntries <= 0 || g_mgr->numEntries > 10000000)) {
+                logf("streaming pool looks wrong (entries=%p num=%d) — re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
+                g_mgr = nullptr;
+            }
             int done = 0;
             for (auto& ov : g_ovs)
             {
-                uint32_t id = 0;
+                uint32_t id = 0xFFFFFFFF;
                 o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
-                if (++done <= 60) logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u)", ov.slot, rel(ov.file), id);
+                ov.id = id;
+                if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
+                    ov.handle = g_mgr->entries[id].handle;
+                if (++done <= 60) logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), id, ov.handle);
             }
             logf("registered %d base-slot override(s)", done);
+            if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
+            InterlockedExchange(&g_idsReady, 1);
         }
 
         // MAP: record each distinct collection the server streams, tagged with whether we'd ever touch it
@@ -205,8 +238,16 @@ static DWORD WINAPI Init(LPVOID)
       for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
       for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
 
-    const uint8_t PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
-    uint8_t* p = scanModule(PAT, sizeof PAT);
+    // rage::strStreamingEngine::ms_info, via the lea in Cfx's g_storeMgr pattern (Streaming.cpp)
+    const short PAT_MGR[] = { 0x74,0x1A,0x8B,0x15,-1,-1,-1,-1,0x48,0x8D,0x0D,-1,-1,-1,-1,0x41 };
+    if (uint8_t* q = scanModule(PAT_MGR, 16)) {
+        g_mgr = (StrMgr*)ripTarget(q + 11);
+        logf("streaming manager @ %p", (void*)g_mgr);
+    }
+    else logf("manager pattern NOT FOUND — claims still register, but nothing can re-assert them");
+
+    const short PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
+    uint8_t* p = scanModule(PAT, sizeof PAT / sizeof *PAT);
     if (!p) { logf("pattern NOT FOUND"); }
     else {
         void* target = (void*)(p - 0x25);
@@ -218,9 +259,25 @@ static DWORD WINAPI Init(LPVOID)
     }
 
     for (int beat = 1;; ++beat) {
-        Sleep(15000);
-        logf("alive (beat %d) — reg=%ld redirects=%ld baseRegistered=%s",
-             beat, (long)g_regTotal, (long)g_redirects, g_didRegister ? "yes" : "no");
+        for (int tick = 0; tick < 15; ++tick) {
+            Sleep(1000);
+            // re-assert: DLC mounts and FiveM's loader re-point claimed slots after us; whoever
+            // writes the handle last wins, so write ours back. Same mechanism Cfx's own override
+            // path uses (LoadStreamingFile.cpp writes Entries[].handle directly).
+            if (!g_off && g_idsReady && g_mgr && g_mgr->entries) {
+                for (auto& ov : g_ovs) {
+                    if (!ov.handle || ov.id >= (uint32_t)g_mgr->numEntries) continue;
+                    StrEntry& e = g_mgr->entries[ov.id];
+                    if (e.handle == ov.handle) continue;
+                    if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
+                    uint32_t old = e.handle;
+                    e.handle = ov.handle;
+                    if (++g_reclaims <= 60) logf("RECLAIM  %s  (%08x -> %08x)", ov.slot, old, ov.handle);
+                }
+            }
+        }
+        logf("alive (beat %d) — reg=%ld redirects=%ld reclaims=%ld deferred=%ld baseRegistered=%s",
+             beat, (long)g_regTotal, (long)g_redirects, g_reclaims, g_deferred, g_didRegister ? "yes" : "no");
     }
 }
 
