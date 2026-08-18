@@ -107,6 +107,35 @@ The patch is a few bytes applied once at startup and is commented in `minhook/sr
 Nothing is transmitted anywhere. The plugin reads a local folder and changes what your client draws.
 Other players keep seeing whatever the server streams.
 
+## Why FiveM allows this
+
+The plugin loads because FiveM's own loader is built to load third-party ASIs, not to block them. Four
+things from Cfx's own source and docs, strongest first:
+
+- **The `FX_ASI_BUILD` stamp is Cfx's API, not a workaround.** The loader looks up an `FX_ASI_BUILD`
+  resource for the running game build, and when a plugin has none it tells you to add
+  `FX_ASI_BUILD <build> BEGIN "\0" END` to the `.rc` file when building the plugin, or to contact its
+  maintainer if you do not have the source. That is Cfx documenting how to ship a supported ASI. You
+  do not build a versioning contract for software you want gone.
+  ([asi-five Component.cpp](https://github.com/citizenfx/fivem/blob/master/code/components/asi-five/src/Component.cpp))
+- **The loader is deny-by-exception.** It loads every `.asi` in the plugins folder except a short
+  hardcoded blacklist (`openiv.asi`, `scripthookvdotnet.asi`, `fspeedometerv.asi`), an outdated
+  `Gears.asi`, and .NET/CLR assemblies. Everything not named loads. An allowlist would be the design
+  if the intent were to restrict.
+  ([asi-five Component.cpp](https://github.com/citizenfx/fivem/blob/master/code/components/asi-five/src/Component.cpp))
+- **The docs say so.** The client manual states FiveM "allows the use of certain plugins," placed in
+  the plugins folder, where you can put "many types of .asi scripts you would typically use in
+  singleplayer," and that servers "have the option to disallow the use of plugins."
+  ([Client Manual](https://docs.fivem.net/docs/client-manual/))
+- **Pure mode is opt-in.** The server-commands reference documents two pure mode levels, 1 and 2.
+  There is no level 0 because level 0 is just a server that has not turned pure mode on, which is the
+  default. ([Server Commands](https://docs.fivem.net/docs/server-manual/server-commands/))
+
+All four settle one question: whether a plugin is allowed to load. None of them say anything about
+what a plugin does in memory once loaded, and none cover the MinHook thread-snapshot patch this
+plugin applies. That is a separate question, covered honestly in [Ban risk, stated
+plainly](#ban-risk-stated-plainly) below.
+
 ## Ban risk, stated plainly
 
 The total write to game memory is one inline hook of about five bytes on a cosmetic asset-routing
