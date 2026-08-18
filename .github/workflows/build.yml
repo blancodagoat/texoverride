@@ -31,5 +31,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" texoverride.asi --title "$GITHUB_REF_NAME" --generate-notes \
+          # release notes = the top (current) section of CHANGELOG.md
+          awk '/^## /{n++} n==1' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" texoverride.asi --title "$GITHUB_REF_NAME" --notes-file notes.md \
             || gh release upload "$GITHUB_REF_NAME" texoverride.asi --clobber

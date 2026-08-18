@@ -1,14 +1,14 @@
-# Valid override collections (GTA V freemode ped)
+# Valid collection folder names
 
-Folder names you can create under `plugins/tex_overrides/`. Anything NOT on this list is refused by
-the safety gate (only collections starting with `mp_m_freemode_01` / `mp_f_freemode_01` are ever
-touched — never story/ambient peds, animals, vehicles, props, maps, or scripts).
+These are the folder names you can create inside `plugins/tex_overrides/`. Any folder name not on
+this list is ignored. The plugin only ever touches player-character (freemode) clothing, never
+story characters, animals, vehicles, props, maps, or scripts.
 
-Enumerated from every DLC pack in `update\x64\dlcpacks` (dlc/dlc1/dlc2) plus `x64v.rpf` / `x64w.rpf`
-(build 3751): **186 freemode collections.** The `_p` variants are prop collections (hats, glasses,
-watches, etc.).
+Names starting with `mp_m_` are for the male character, `mp_f_` for the female one. Names ending
+in `_p` are for worn props: hats, glasses, watches, and so on. The list was read out of the game
+files themselves (game build 3751): **186 collections** in total.
 
-Put a component file at `tex_overrides/<collection>/<file>`, e.g.
+Usage: put your file inside a folder with the collection's name, like
 `tex_overrides/mp_m_freemode_01_mp_m_airraces_01/uppr_003_u.ydd`.
 
 ## Collections
