@@ -21,6 +21,8 @@
 // every distinct collection the server streams (tagged), so you can see what is in reach.
 
 #include <windows.h>
+#include <winhttp.h>
+#pragma comment(lib, "winhttp.lib")
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -69,7 +71,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.3.0"
+#define TEXOVERRIDE_VERSION "0.4.0"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -483,6 +485,67 @@ static void Setup()
     }
 }
 
+// ---- update check: one HTTPS ask at startup, "what is the newest release tag?" ----
+// Sends nothing except the request itself. Fails silently when offline. Skipped when _OFF or
+// _NO_UPDATE_CHECK exists in tex_overrides. Runs on its own thread so a shown popup never
+// blocks the re-assert loop.
+static int verCmp(const char* a, const char* b)   // >0 when a is newer than b
+{
+    int A[3] = {}, B[3] = {};
+    sscanf_s(a, "%d.%d.%d", &A[0], &A[1], &A[2]);
+    sscanf_s(b, "%d.%d.%d", &B[0], &B[1], &B[2]);
+    for (int i = 0; i < 3; ++i) if (A[i] != B[i]) return A[i] - B[i];
+    return 0;
+}
+
+static DWORD WINAPI UpdateCheck(LPVOID)
+{
+    if (g_off) return 0;
+    if (GetFileAttributesA((std::string(g_overrideDir) + "_NO_UPDATE_CHECK").c_str()) != INVALID_FILE_ATTRIBUTES) return 0;
+
+    std::string body;
+    HINTERNET s = WinHttpOpen(L"texoverride", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) return 0;
+    WinHttpSetTimeouts(s, 5000, 5000, 5000, 5000);
+    HINTERNET c = WinHttpConnect(s, L"api.github.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", L"/repos/blancodagoat/texoverride/releases/latest",
+                                         nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                         WINHTTP_FLAG_SECURE) : nullptr;
+    if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0)
+          && WinHttpReceiveResponse(r, nullptr)) {
+        char buf[4096]; DWORD got = 0;
+        while (WinHttpReadData(r, buf, sizeof buf, &got) && got) body.append(buf, got);
+    }
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    WinHttpCloseHandle(s);
+
+    // pull the version out of "tag_name":"v0.3.0" without a JSON library
+    std::string latest;
+    size_t k = body.find("\"tag_name\"");
+    if (k != std::string::npos) {
+        size_t q1 = body.find('"', body.find(':', k) + 1);
+        size_t q2 = (q1 == std::string::npos) ? std::string::npos : body.find('"', q1 + 1);
+        if (q2 != std::string::npos) latest = body.substr(q1 + 1, q2 - q1 - 1);
+    }
+    if (latest.empty()) { logf("update check: could not reach GitHub (offline?)"); return 0; }
+    const char* lv = (latest[0] == 'v' || latest[0] == 'V') ? latest.c_str() + 1 : latest.c_str();
+
+    if (verCmp(lv, TEXOVERRIDE_VERSION) > 0) {
+        logf("update check: %s is out (you have " TEXOVERRIDE_VERSION ")", latest.c_str());
+        char msg[256];
+        _snprintf_s(msg, sizeof msg, _TRUNCATE,
+            "A newer texoverride is out: %s (you have " TEXOVERRIDE_VERSION ").\n\n"
+            "Get it at:\ngithub.com/blancodagoat/texoverride/releases\n\n"
+            "To turn this check off, create a file named _NO_UPDATE_CHECK in tex_overrides.",
+            latest.c_str());
+        MessageBoxA(nullptr, msg, "texoverride update", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+    }
+    else logf("update check: up to date (latest %s)", latest.c_str());
+    return 0;
+}
+
 static DWORD WINAPI BeatLoop(LPVOID)
 {
     for (int beat = 1;; ++beat) {
@@ -515,6 +578,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
         g_self = h; DisableThreadLibraryCalls(h);
         Setup();   // synchronous: must finish before the game's entry point runs (see Setup)
         CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
+        CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
     }
     return TRUE;
 }

@@ -104,10 +104,23 @@ it is the wrong file or the game has updated, it changes nothing and says so in 
 check is also why you should leave most of the file unedited. If nearly every entry is changed,
 there is nothing left to check against, and the plugin skips the file.
 
+## Update check
+
+At startup the plugin asks GitHub one question: what is the newest release number? If a newer
+version is out, a small popup tells you and points to the download page. That is the plugin's
+only network use. It sends nothing about you, your game or your files, and if you are offline it
+quietly does nothing.
+
+To turn the check off, create an empty file named `_NO_UPDATE_CHECK` inside `tex_overrides`.
+
+One honest limit: when FiveM moves to a new game build, old plugin versions stop loading at all
+(see [The build stamp](#the-build-stamp)). A plugin that does not load cannot show a popup, so
+after a big game update, check the releases page yourself.
+
 ## Turning it off
 
 Create an empty file named `_OFF` (no file extension) inside `tex_overrides` and restart FiveM.
-The plugin stays installed but does nothing.
+The plugin stays installed but does nothing, including the update check.
 
 ## Reading the log
 
@@ -129,6 +142,7 @@ launch.
 | `REDIRECT name -> file` | A server file was swapped for yours |
 | `PLACEMENT ...` | A tattoo position change was applied |
 | `collection: name [tag]` | A collection the server uses, and whether it is reachable |
+| `update check: ...` | Whether you have the newest version |
 | `alive (beat N) ...` | Heartbeat; the plugin is still running |
 | `pattern NOT FOUND` | The game updated; the plugin needs an update |
 
@@ -179,8 +193,10 @@ The path handed to the game is a plain absolute path, which FiveM's VFS opens wi
 The game reads the whole resource from your file (header, page flags, data), so there is no size
 or flag mismatch to manage.
 
-Nothing is transmitted anywhere. The plugin reads a local folder and changes what your client
-draws. Other players keep seeing whatever the server streams.
+The plugin makes exactly one network request: at startup it asks GitHub for the newest release
+number (see [Update check](#update-check)). Nothing else is transmitted anywhere, and nothing is
+ever sent to the game server. The plugin reads a local folder and changes what your client draws.
+Other players keep seeing whatever the server streams.
 
 ## Why FiveM allows this
 

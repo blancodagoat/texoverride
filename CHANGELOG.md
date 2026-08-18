@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 (2026-08-18)
+
+- Update check. At startup the plugin asks GitHub for the newest release number, and shows a
+  small popup when a newer version is out. That is its only network use; nothing about you or
+  your game is sent. Turn it off with an empty `_NO_UPDATE_CHECK` file in `tex_overrides`, or
+  skip everything with `_OFF` as before.
+
 ## 0.3.0 (2026-08-18)
 
 - Tattoos, skin, face paint, beards and other body overlays can be replaced by putting the
