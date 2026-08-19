@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 (2026-08-19)
+
+- Live reload. The plugin now watches `tex_overrides` while you play. Save an edited
+  `overlays.xml` and the tattoo moves in game within a second or two. New `.ytd` and `.ydd`
+  files are picked up without a restart. Overwritten textures show the next time the game
+  reloads that item, so take the outfit or tattoo off and put it back on to see them. When
+  something cannot be applied live, the log says so.
+- Crash saver. If the game crashes right after a live change, the next launch refuses to load
+  the files involved and says so in the log, so one broken file cannot crash the game twice.
+  Delete `_quarantine.txt` from `tex_overrides` to let them load again.
+
 ## 0.4.1 (2026-08-19)
 
 - Dropped `.meta` files (like `shop_tattoo.meta`) now get an "ignored" line in the log instead of

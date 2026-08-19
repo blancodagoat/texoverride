@@ -121,6 +121,25 @@ it is the wrong file or the game has updated, it changes nothing and says so in 
 check is also why you should leave most of the file unedited. If nearly every entry is changed,
 there is nothing left to check against, and the plugin skips the file.
 
+## Changing files while the game runs
+
+You do not have to restart FiveM after every change. The plugin watches the `tex_overrides`
+folder while you play and reacts on its own when something in it changes.
+
+- Save an edited `overlays.xml` and the tattoo moves on your ped within a second or two. This
+  makes tuning easy: nudge a number, save, look, repeat.
+- Drop in a new `.ytd` or `.ydd` and it is picked up right away.
+- Overwrite a `.ytd` that is already in use and the new picture shows the next time the game
+  reloads that item. Take the clothing or tattoo off and put it back on to force that.
+
+There is nothing to set up and nothing to turn on. If a change cannot be applied live, the log
+says so and a restart will apply it.
+
+There is also a safety net. If the game crashes right after a live change, the plugin remembers
+which files were involved. On the next launch it refuses to load them, and the log tells you.
+That way one broken file cannot crash the game again and again. When you have fixed or replaced
+the file, delete `_quarantine.txt` from `tex_overrides` and it loads normally again.
+
 ## Update check
 
 At startup the plugin asks GitHub one question: what is the newest release number? If a newer
