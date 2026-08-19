@@ -134,6 +134,26 @@ _quarantine.txt, and scanDir/rescanTree refuse them until the user deletes that 
 exit deletes the journal in DLL_PROCESS_DETACH (a real crash never runs it). New patterns used:
 getRawStreamer + pgRawStreamer::GetEntry (both from Cfx LoadStreamingFile.cpp).
 
+## Streaming-cost audit + budget raiser (v0.5.2 / v0.6.0)
+
+Texture loss ("stuck low LOD, black walls, restart needed") = the game's VRAM budget running dry;
+eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (open cfx issue
+#3874). Two answers in the plugin:
+
+- **Cost audit (0.5.2)**: every .ytd/.ydd on disk is an RSC7 resource; header dwords 2/3
+  (system/graphics flags) encode the exact resident memory via CodeWalker's `GetSizeFromFlags`
+  (`rscSizeFromFlags` in dllmain.cpp — pages sum x (0x200 << shift)). scanDir totals it, logs
+  `pack cost when fully loaded` + `HEAVY` lines for files >= 8 MB (catches 4K anything and 2K
+  uncompressed; vanilla clothing txds are under 2 MB).
+- **Budget raiser (0.6.0, opt-in)**: the budget is a data table in GTA5.exe — 20 rows x 4 uint64
+  (half / 1.5th / full / full per texture-quality tier). FiveM fills it in
+  PatchExtendedBudgeting.cpp (3 GB x slider multiplier, slider = vid_budgetScale, console-locked
+  in production) and rewrites it on settings changes. `_budget.txt` in tex_overrides (a number of
+  GB) -> pattern `4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14` (address at +6, Cfx's own), sanity check
+  the row shape before any write (`vramTableSane`, SEH), clamp to DXGI dedicated VRAM, then
+  re-assert each beat (`budgetBeat`). Aligned 8-byte data writes only; fault disables just this
+  feature. Do not add a silent default — past real VRAM D3D11 demotes to system RAM and stutters.
+
 ## The overlay index (docs/overlay_index.tsv)
 
 3,921 vanilla presets: preset → collection → source overlays.xml path → zone/type/gender/uv/scale/

@@ -30,6 +30,8 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
+#include <dxgi.h>
+#pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 #include <string>
@@ -118,7 +120,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.5.2"
+#define TEXOVERRIDE_VERSION "0.6.0"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -820,6 +822,72 @@ static DWORD WINAPI BeatLoop(LPVOID);
 // patch race-free by construction, with no thread freezing: the same guarantee FiveM relies on
 // for its own HookFunction patches in that window. (MinHook's freeze never worked under FiveM
 // anyway — CreateToolhelp32Snapshot is blocked — so before this it was safe only by luck.)
+// ---- texture budget raiser (opt-in: _budget.txt holds a number of GB) -----------------------
+// The game's texture budget is a plain data table in GTA5.exe: 20 rows of 4 uint64 budgets, one
+// column per texture-quality level. FiveM fills it at boot (PatchExtendedBudgeting.cpp) with
+// 3 GB x the Extended Texture Budget slider's multiplier, and rewrites it whenever the slider
+// moves. "Texture loss" (stuck low detail, black walls, restart needed) is this budget running
+// dry — the eviction algorithm inside GTA5.exe only frees memory under pressure (cfx issue
+// #3874), so a bigger ceiling means more headroom before the cliff. Data writes only, same
+// class as the handle re-assert; re-asserted each beat because the settings screen rewrites it.
+// Clamped to the card's real dedicated VRAM: past that, D3D11 demotes textures to system RAM
+// and the game stutters hard, which is why this is opt-in and never a silent default.
+static uint64_t* g_vramTable = nullptr;
+static uint64_t  g_budget = 0;              // requested bytes; 0 = feature off
+static volatile LONG g_budgetFault = 0;
+static long g_budgetWrites = 0;
+
+static bool vramTableSane(uint64_t* t)      // refuse to write unless it looks like Cfx filled it
+{
+    __try {
+        for (int i = 0; i < 80; i += 4) {
+            uint64_t full = t[i + 3];       // rows are half / 1.5th / full / full of the budget
+            if (full != t[i + 2] || full < (1ull << 30) || full > (48ull << 30) || t[i] >= full)
+                return false;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static uint64_t dedicatedVram()             // biggest hardware adapter; 0 when unknowable
+{
+    uint64_t best = 0; IDXGIFactory1* f = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return 0;
+    IDXGIAdapter1* a = nullptr;
+    for (UINT i = 0; f->EnumAdapters1(i, &a) == S_OK; ++i) {
+        DXGI_ADAPTER_DESC1 d;
+        if (SUCCEEDED(a->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && d.DedicatedVideoMemory > best)
+            best = d.DedicatedVideoMemory;
+        a->Release();
+    }
+    f->Release();
+    return best;
+}
+
+static void budgetBeatImpl()
+{
+    if (g_vramTable[3] == g_budget) return;   // our value is standing
+    uint64_t old = g_vramTable[3];
+    for (int i = 0; i < 80; i += 4) {         // same rows, same ratios as Cfx's own writer
+        g_vramTable[i + 3] = g_budget;
+        g_vramTable[i + 2] = g_budget;
+        g_vramTable[i + 1] = (uint64_t)(g_budget / 1.5);
+        g_vramTable[i]     = g_budget / 2;
+    }
+    if (++g_budgetWrites <= 10)
+        logf("texture budget: %.1f -> %.1f GB%s", old / 1073741824.0, g_budget / 1073741824.0,
+             g_budgetWrites == 1 ? "" : " (re-asserted; the settings screen rewrote it)");
+}
+static void budgetBeat()
+{
+    if (!g_budget || g_budgetFault || !g_vramTable) return;
+    __try { budgetBeatImpl(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedExchange(&g_budgetFault, 1);
+        logf("budget: FAULT writing the table — raised budget disabled for this session");
+    }
+}
+
 static void Setup()
 {
     char self[MAX_PATH]; GetModuleFileNameA(g_self, self, MAX_PATH);
@@ -878,6 +946,39 @@ static void Setup()
       if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
       logf("live reload: rawStreamer=%s getEntry=%s",
            g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING"); }
+
+    // opt-in texture budget raise: _budget.txt in tex_overrides holds a number of GB
+    { char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
+      FILE* bf = nullptr;
+      if (!fopen_s(&bf, bp, "rb") && bf) {
+          char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
+          double gb = atof(buf);
+          if (gb >= 1.0 && gb <= 48.0) g_budget = (uint64_t)(gb * 1073741824.0);
+          else logf("budget: _budget.txt must hold a number of GB between 1 and 48 — ignored");
+      } }
+    if (g_budget) {
+        uint64_t vram = dedicatedVram();
+        if (vram && g_budget > vram) {
+            logf("budget: your card has %.1f GB of VRAM; clamping the requested %.1f GB to that",
+                 vram / 1073741824.0, g_budget / 1073741824.0);
+            g_budget = vram;
+        }
+        // the per-quality VRAM budget table, via the pattern Cfx resolves it with
+        // (PatchExtendedBudgeting.cpp: "4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14", address at +6)
+        const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
+        uint8_t* q = scanModule(PAT_VRAM, 13);
+        uint64_t* t = q ? (uint64_t*)ripTarget(q + 6) : nullptr;
+        if (t && vramTableSane(t)) {
+            g_vramTable = t;
+            logf("budget: raising the texture budget to %.1f GB (table @ %p, was %.1f GB)",
+                 g_budget / 1073741824.0, (void*)t, t[3] / 1073741824.0);
+        }
+        else {
+            g_budget = 0;
+            logf("budget: vram table %s — budget raise disabled, everything else still works",
+                 q ? "failed the sanity check" : "pattern NOT FOUND");
+        }
+    }
 
     const short PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
     uint8_t* p = scanModule(PAT, sizeof PAT / sizeof *PAT);
@@ -989,6 +1090,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
                 EnterCriticalSection(&g_cs);
                 placementBeatSafe();   // apply/re-assert tattoo placement edits
                 LeaveCriticalSection(&g_cs);
+                budgetBeat();          // re-assert the raised texture budget (aligned data writes)
             }
         }
         logf("alive (beat %d) — reg=%ld redirects=%ld reclaims=%ld deferred=%ld baseRegistered=%s",

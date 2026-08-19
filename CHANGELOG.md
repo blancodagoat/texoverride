@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 (2026-08-19)
+
+- You can now raise the game's texture budget past what the settings slider allows. Put a file
+  named `_budget.txt` holding a number of GB (for example `8`) into `tex_overrides` and restart.
+  The plugin caps the number at what your video card actually has, checks that it found the right
+  spot in memory before writing anything, and keeps the value in place when the settings screen
+  tries to put it back. More budget means more headroom before the "stuck on low detail" bug
+  hits. It is not a cure, and asking for more than your card can hold would cause stutter, which
+  is why the plugin refuses to go past your real VRAM.
+
 ## 0.5.2 (2026-08-19)
 
 - The log now reports what the whole pack costs the game in memory once everything is loaded,

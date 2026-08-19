@@ -174,6 +174,20 @@ character and leave the rest of the game room to breathe.
 If it still happens with a light pack, it is the server, not you. Set Extended Texture Budget to
 the highest value your video card allows (Settings, Graphics) and lower Texture Quality one step.
 
+### Raising the budget past the slider
+
+The slider stops well below what a big video card can hold. If you have VRAM to spare, put a file
+named `_budget.txt` into `tex_overrides` containing just a number of GB, for example:
+
+```
+8
+```
+
+Restart FiveM. The log will show a line like `texture budget: 6.0 -> 8.0 GB`. The plugin refuses
+numbers above what your card physically has, because going past real VRAM makes the game stutter
+instead of helping. This buys headroom before the bug hits; it does not remove the bug, which
+lives inside GTA itself. Delete the file to go back to normal.
+
 ## Turning it off
 
 Create an empty file named `_OFF` (no file extension) inside `tex_overrides` and restart FiveM.
@@ -191,6 +205,7 @@ launch.
 | indented `collection N file(s)` lines | How your files were grouped |
 | `pack cost when fully loaded: ...` | What your files cost the game in memory |
 | `HEAVY x MB file` | That file is oversized; shrink it to avoid texture loss |
+| `texture budget: a -> b GB` | Your `_budget.txt` raise was applied |
 | `placement: collection ... N preset(s)` | Your edited `.xml` was read |
 | `placement: ... layout solved` | The `.xml` matched the game; changes can be applied |
 | `streaming manager @ ...` | Internal: found what it needs to keep overrides in place |
