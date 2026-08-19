@@ -110,6 +110,30 @@ Why not applied (from GameSource + Rockstar's own .psc parser schema):
   runtime (no published pattern, must be located by hand). Add-only avoids the Remove + per-pack
   CRC-name problem; a true replace needs Remove(originalName) first.
 
+## Live reload (v0.5.0)
+
+A watcher thread (spawned from BeatLoop once g_idsReady) sits on FindFirstChangeNotification over
+tex_overrides — event-driven, no polling; 500ms debounce, then one rescan. Three change kinds:
+edited root .xml re-parses and merges into g_pl (solved layout carried over when preset hashes
+match, so live tattoo tuning never re-fingerprints against already-patched memory); overwritten
+.ytd/.ydd gets its pgRawStreamer entry re-statted (timestamp = 0 + GetEntry — Cfx's own trick,
+LoadStreamingFile.cpp ~1968); brand-new files register mid-session.
+
+THREADING (the load-bearing part): RAGE's RegisterObject → module->Register inserts into name
+tables with NO lock (verified in GameSource streaminginfo.cpp:4274), and the game main thread
+reads them constantly — which is why Cfx does mid-session registration on OnMainGameFrame. We
+reach the same thread via an IAT shim on the game exe's PeekMessageW import (the main loop pumps
+it every frame; Cfx's ZOffThreadWindowing IAT-hooks the same import). Watcher queues LiveOps,
+h_peekMsg drains them on the first-caller thread only. Never move register/re-stat back onto the
+watcher thread. (Historical: rage-allocator-five's ThreadAttachment.cpp stamps allocator TLS into
+every new thread on DLL_THREAD_ATTACH once the game boots — was the fallback plan, not needed.)
+
+CRASH SAVER: batches journal to tex_overrides\_inflight.txt before the game thread touches them;
+journal persists 30s after apply. Crash inside the window → next launch appends those keys to
+_quarantine.txt, and scanDir/rescanTree refuse them until the user deletes that file. Orderly
+exit deletes the journal in DLL_PROCESS_DETACH (a real crash never runs it). New patterns used:
+getRawStreamer + pgRawStreamer::GetEntry (both from Cfx LoadStreamingFile.cpp).
+
 ## The overlay index (docs/overlay_index.tsv)
 
 3,921 vanilla presets: preset → collection → source overlays.xml path → zone/type/gender/uv/scale/

@@ -19,6 +19,13 @@
 // one texture dictionary by exact name (see isAllowedKey), and placement .xml files only ever
 // touch tattoo preset floats after a fingerprint match (see the placement section). It also logs
 // every distinct collection the server streams (tagged), so you can see what is in reach.
+//
+// v0.5.0 adds live reload: a watcher thread reacts when tex_overrides changes (event-driven, no
+// polling) — edited placement xml applies in-game within a second, new files register mid-session
+// the same way Cfx does on resource restarts, overwritten files get their raw entry re-statted.
+// Game-touching work runs on the game's MAIN thread (queued, drained via a PeekMessageW IAT
+// shim), matching Cfx's own threading; a journal + quarantine (crash saver) makes sure a file
+// that crashes the game is not loaded again on the next launch. See the live-reload section.
 
 #include <windows.h>
 #include <winhttp.h>
@@ -47,6 +54,8 @@ struct Ov {
 static std::vector<Ov> g_ovs;
 static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
+static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
+static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH];
 
 // rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
 // loader actually opens; layout from Cfx's gta-streaming-five/include/Streaming.h.
@@ -71,7 +80,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.4.1"
+#define TEXOVERRIDE_VERSION "0.5.0"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -139,6 +148,7 @@ static int scanDir(const std::string& base, const std::string& rel)
                     logf("SKIP (folders must be freemode-ped collections, root files must be .ytd): %s", slotStr.c_str());
                     continue;
                 }
+                if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
                 const char* slot = _strdup(slotStr.c_str());
                 const char* file = _strdup(fwd(base + childRel).c_str());      // our absolute path
                 g_ovs.push_back({ slot, file });
@@ -212,7 +222,7 @@ static int32_t   g_decorCollOff = -1;             // offset of collections atArr
 static bool g_plLocated = false;
 static volatile LONG g_plFault = 0;
 
-static void parsePlacementXml(const std::string& path, const char* fname)
+static void parsePlacementXml(const std::string& path, const char* fname, std::vector<PlColl>& out)
 {
     FILE* f; if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return;
     std::string x; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
@@ -251,7 +261,7 @@ static void parsePlacementXml(const std::string& path, const char* fname)
         pos = end + 7;
     }
     if (pc.presets.size() < 3) { logf("placement: %s has %zu preset(s), need 3+ to fingerprint, ignored", fname, pc.presets.size()); return; }
-    g_pl.push_back(std::move(pc));
+    out.push_back(std::move(pc));
 }
 
 static void placementLocate()
@@ -366,6 +376,325 @@ static void placementBeatSafe()
 typedef uint32_t* (*RegRaw_t)(uint32_t*, const char*, bool, const char*, bool);
 static RegRaw_t o_regRaw = nullptr;
 
+// ============================ live reload (watch tex_overrides) ============================
+// A watcher thread sits on FindFirstChangeNotification: fully event-driven, no polling. When the
+// folder changes it waits half a second for the writes to go quiet, then rescans once.
+//
+//   - edited placement .xml  -> re-parsed, layout carried over, applied by the next beat
+//   - overwritten .ytd/.ydd  -> raw-streamer entry invalidated so the next load re-reads the file
+//                               (Cfx's own trick: timestamp = 0, then GetEntry re-stats — see
+//                               LoadStreamingFile.cpp; the game shows it when the item reloads)
+//   - brand-new file         -> registered mid-session, exactly what Cfx does on every resource
+//                               restart (CfxCollection_AddStreamingFileByTag -> LoadStreamingFiles)
+//
+// THREADING — the two game-touching operations (register, re-stat) never run on the watcher
+// thread. RAGE's registration path (strStreamingInfoManager::RegisterObject -> module->Register)
+// inserts into name tables with no lock, and the game's main thread reads those tables all the
+// time; that is why Cfx runs its own mid-session registrations on the main thread
+// (OnMainGameFrame). We reach the same thread without another code hook: the game's main loop
+// pumps messages through its user32 PeekMessageW import every frame (Cfx's ZOffThreadWindowing
+// IAT-hooks that exact import), so the watcher queues work and our own IAT shim on that import
+// drains the queue on the main thread. An IAT swap is a pointer write in the exe's import table,
+// the same mechanism every overlay uses.
+//
+// CRASH SAVER — before a batch is handed to the game thread it is journaled to
+// tex_overrides\_inflight.txt, and the journal stays for 30 seconds after it applies (a broken
+// texture usually crashes within moments of streaming in). If the game dies inside that window,
+// the next launch moves those names into _quarantine.txt, refuses to load them, and says so in
+// the log. Deleting _quarantine.txt lifts it. A bad file can crash at most one session.
+
+typedef void* (*GetRawStreamer_t)();          // returns the game's pgRawStreamer instance
+typedef uint8_t* (*RawGetEntry_t)(void*, uint16_t);   // pgRawStreamer::GetEntry(index)
+static GetRawStreamer_t g_getRawStreamerFn = nullptr;
+static RawGetEntry_t    g_rawGetEntryFn = nullptr;
+static bool g_watcherStarted = false;
+
+struct LiveOp { int kind; Ov ov; uint32_t handle; };            // kind: 0 = register, 1 = re-stat
+static std::vector<LiveOp> g_opQ;                               // guarded by g_cs
+static volatile LONG g_opsPending = 0;                          // batch queued, not yet drained
+static ULONGLONG g_journalClearAt = 0;                          // watcher thread only
+
+// Overwritten file: zero the raw entry's timestamp, then GetEntry re-stats it (new size picked
+// up). Without this an overwritten file keeps its old cached size — short or wild reads.
+// RawEntry layout from Cfx fiCollectionWrapper.h: fe 16 bytes, timestamp at +16.
+static bool rawInvalidate(uint32_t handle)
+{
+    __try {
+        void* rs = g_getRawStreamerFn();
+        if (!rs) return false;
+        uint16_t idx = (uint16_t)(handle & 0xFFFF);
+        uint8_t* e = g_rawGetEntryFn(rs, idx);
+        if (!e) return false;
+        *(uint64_t*)(e + 16) = 0;
+        g_rawGetEntryFn(rs, idx);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// Register one new file mid-session, same call and flags as the startup pass. SEH: a fault here
+// must not take the game down; worst case the file just is not picked up.
+static bool liveRegister(Ov& ov)
+{
+    __try {
+        uint32_t id = 0xFFFFFFFF;
+        o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
+        ov.id = id;
+        if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
+            ov.handle = g_mgr->entries[id].handle;
+        return ov.id != 0xFFFFFFFF && ov.handle != 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// ---- main-thread pump: IAT shim on the game exe's PeekMessageW import ----
+typedef BOOL (WINAPI* PeekMsg_t)(LPMSG, HWND, UINT, UINT, UINT);
+static PeekMsg_t g_origPeek = nullptr;
+static DWORD g_pumpTid = 0;
+
+static void drainOps()   // runs on the game's main thread
+{
+    EnterCriticalSection(&g_cs);
+    std::vector<LiveOp> ops; ops.swap(g_opQ);
+    LeaveCriticalSection(&g_cs);
+    for (auto& op : ops) {
+        if (op.kind == 0) {
+            if (liveRegister(op.ov)) {
+                EnterCriticalSection(&g_cs);
+                g_ovs.push_back(op.ov); g_bySlot[op.ov.slot] = op.ov.file;
+                LeaveCriticalSection(&g_cs);
+                logf("LIVE-ADD  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+            } else {
+                logf("live reload: could not register %s, restart to pick it up", op.ov.slot);
+                free((void*)op.ov.slot); free((void*)op.ov.file);
+            }
+        } else {
+            if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
+                logf("LIVE-UPDATE  %s reread from disk; reapply the outfit or tattoo to see it", op.ov.slot);
+            else
+                logf("live reload: %s changed, could not refresh it, restart to apply", op.ov.slot);
+            free((void*)op.ov.slot);
+        }
+    }
+    InterlockedExchange(&g_opsPending, 0);
+}
+
+static BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
+{
+    // the first caller after install is the game's main loop (it pumps every frame);
+    // only that thread ever drains, so ops always run where Cfx runs its own registrations
+    DWORD tid = GetCurrentThreadId();
+    if (!g_pumpTid) g_pumpTid = tid;
+    if (g_opsPending && tid == g_pumpTid) drainOps();
+    return g_origPeek(m, w, a, b, r);
+}
+
+static bool installPump()
+{
+    uint8_t* mod = (uint8_t*)GetModuleHandleA(nullptr);
+    auto dos = (IMAGE_DOS_HEADER*)mod;
+    auto nt  = (IMAGE_NT_HEADERS*)(mod + dos->e_lfanew);
+    auto dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return false;
+    for (auto imp = (IMAGE_IMPORT_DESCRIPTOR*)(mod + dir.VirtualAddress); imp->Name; ++imp) {
+        if (_stricmp((const char*)(mod + imp->Name), "user32.dll") != 0) continue;
+        auto thunk = (IMAGE_THUNK_DATA*)(mod + imp->FirstThunk);
+        auto orig  = (IMAGE_THUNK_DATA*)(mod + imp->OriginalFirstThunk);
+        for (; orig->u1.AddressOfData; ++thunk, ++orig) {
+            if (orig->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            auto byName = (IMAGE_IMPORT_BY_NAME*)(mod + orig->u1.AddressOfData);
+            if (strcmp((const char*)byName->Name, "PeekMessageW") != 0) continue;
+            DWORD old;
+            if (!VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) return false;
+            g_origPeek = (PeekMsg_t)thunk->u1.Function;
+            thunk->u1.Function = (ULONGLONG)h_peekMsg;
+            VirtualProtect(&thunk->u1.Function, sizeof(void*), old, &old);
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---- crash saver ----
+static void journalWrite(const std::vector<LiveOp>& batch)
+{
+    FILE* f; if (fopen_s(&f, g_inflightPath, "w") != 0 || !f) return;
+    for (auto& op : batch) fprintf(f, "%s\n", op.ov.slot);
+    fclose(f);
+}
+
+// Called at startup, before the folder scan. A leftover _inflight.txt means the game died while
+// (or moments after) those files were being applied live — quarantine them.
+static void crashSaverStartup()
+{
+    FILE* f;
+    if (fopen_s(&f, g_inflightPath, "r") == 0 && f) {
+        char line[512]; bool any = false;
+        FILE* q = nullptr; fopen_s(&q, g_quarantinePath, "a");
+        while (fgets(line, sizeof line, f)) {
+            std::string k = line;
+            while (!k.empty() && (k.back() == '\n' || k.back() == '\r')) k.pop_back();
+            if (k.empty()) continue;
+            if (g_quarantine.insert(k).second && q) fprintf(q, "%s\n", k.c_str());
+            any = true;
+        }
+        fclose(f); if (q) fclose(q);
+        if (any) logf("CRASH SAVER: the game did not shut down cleanly right after live changes; the files involved are quarantined");
+    }
+    DeleteFileA(g_inflightPath);
+    if (fopen_s(&f, g_quarantinePath, "r") == 0 && f) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            std::string k = line;
+            while (!k.empty() && (k.back() == '\n' || k.back() == '\r')) k.pop_back();
+            if (!k.empty()) g_quarantine.insert(k);
+        }
+        fclose(f);
+        for (auto& k : g_quarantine)
+            logf("QUARANTINED %s — not loaded; delete _quarantine.txt in tex_overrides to try it again", k.c_str());
+    }
+}
+
+struct Snap { uint64_t wt; uint64_t size; };
+static std::unordered_map<std::string, Snap> g_snap;   // full path -> stamp; watcher thread only
+
+static void mergePlacement(std::vector<PlColl>& fresh)
+{
+    EnterCriticalSection(&g_cs);
+    for (auto& npc : fresh) {
+        PlColl* old = nullptr;
+        for (auto& pc : g_pl) if (pc.src == npc.src) { old = &pc; break; }
+        // carry a solved layout over when the file still describes the same presets, so a tuning
+        // edit applies without a fresh fingerprint (which edited values would keep failing)
+        if (old && old->solved && old->hash == npc.hash && old->presets.size() == npc.presets.size()) {
+            bool same = true;
+            for (size_t i = 0; i < npc.presets.size(); ++i)
+                if (old->presets[i].hash != npc.presets[i].hash) { same = false; break; }
+            if (same) {
+                npc.arrOff = old->arrOff; npc.nameOff = old->nameOff;
+                npc.stride = old->stride; npc.uvOff = old->uvOff; npc.solved = true;
+            }
+        }
+        logf("placement: %s reloaded from %s (%zu presets%s)", npc.name.c_str(), npc.src.c_str(),
+             npc.presets.size(), npc.solved ? ", layout kept" : "");
+        if (old) *old = std::move(npc); else g_pl.push_back(std::move(npc));
+    }
+    LeaveCriticalSection(&g_cs);
+    if (g_plFault) logf("placement: NOTE — placement is disabled for this session (earlier fault), edits will apply after a restart");
+}
+
+// Detects what changed and queues work; the game-touching half runs later in drainOps on the
+// main thread. quiet = the baseline pass right after the watcher starts: it seeds the stamp map
+// (and still queues files that appeared during loading) without re-logging SKIP/IGNORED lines
+// the startup scan already wrote.
+static void rescanTree(const std::string& base, const std::string& sub, bool quiet, std::vector<std::string>& xmls, std::vector<LiveOp>& batch)
+{
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((base + sub + "\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        std::string name = fd.cFileName;
+        if (name == "." || name == "..") continue;
+        std::string childRel = sub.empty() ? name : sub + "\\" + name;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { rescanTree(base, childRel, quiet, xmls, batch); continue; }
+
+        std::string full = base + childRel;
+        Snap now{ ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime,
+                  ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow };
+        auto it = g_snap.find(full);
+        bool isNew = (it == g_snap.end()), isChanged = !isNew && (it->second.wt != now.wt || it->second.size != now.size);
+        g_snap[full] = now;
+        if (!isNew && !isChanged) continue;
+
+        std::string ln = lower(name);
+        if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
+            if (isNew && !quiet) logf("IGNORED %s — .meta files hold shop data (prices/menus), not looks; see README", fwd(childRel).c_str());
+            continue;
+        }
+        if (sub.empty() && ln.size() > 4 && ln.compare(ln.size()-4, 4, ".xml") == 0) { if (!quiet) xmls.push_back(name); continue; }
+        if (ln.size() <= 4 || (ln.compare(ln.size()-4,4,".ytd") != 0 && ln.compare(ln.size()-4,4,".ydd") != 0)) continue;
+
+        std::string key = lower(fwd(childRel));
+        if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
+        if (!isAllowedKey(key)) {
+            if (isNew && !quiet) logf("SKIP (folders must be freemode-ped collections, root files must be .ytd): %s", key.c_str());
+            continue;
+        }
+
+        EnterCriticalSection(&g_cs);
+        uint32_t handle = 0; bool known = false;
+        for (auto& ov : g_ovs) if (key == ov.slot) { known = true; handle = ov.handle; break; }
+        LeaveCriticalSection(&g_cs);
+
+        if (!known) {
+            if (!g_origPeek) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
+            batch.push_back({ 0, { _strdup(key.c_str()), _strdup(fwd(full).c_str()) }, 0 });
+        }
+        else if (handle && isChanged) {
+            if ((handle >> 16) != 0)   // not in the game's own raw streamer; cannot re-stat it
+                logf("live reload: %s changed, restart to apply (handle %08x not raw)", key.c_str(), handle);
+            else if (!g_origPeek)
+                logf("live reload: %s changed, restart to apply", key.c_str());
+            else
+                batch.push_back({ 1, { _strdup(key.c_str()), nullptr }, handle });
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+}
+
+// Hand a batch to the game thread: journal first (crash saver), one batch in flight at a time.
+static void submitBatch(std::vector<LiveOp>& batch)
+{
+    // the previous batch drains within a frame; if the game thread stopped pumping (shutdown,
+    // hang) give up after 10s instead of wedging the watcher
+    for (int i = 0; InterlockedCompareExchange(&g_opsPending, 0, 0) && i < 200; ++i) Sleep(50);
+    if (g_opsPending) {
+        logf("live reload: game thread is not draining changes, dropping this batch");
+        for (auto& op : batch) { free((void*)op.ov.slot); free((void*)op.ov.file); }
+        return;
+    }
+    journalWrite(batch);
+    EnterCriticalSection(&g_cs);
+    for (auto& op : batch) g_opQ.push_back(op);
+    LeaveCriticalSection(&g_cs);
+    InterlockedExchange(&g_opsPending, 1);
+    g_journalClearAt = GetTickCount64() + 30000;   // journal outlives the apply; see CRASH SAVER above
+}
+
+static DWORD WINAPI WatchLoop(LPVOID)
+{
+    std::string dir = g_overrideDir; if (!dir.empty() && dir.back() == '\\') dir.pop_back();
+    HANDLE h = FindFirstChangeNotificationA(dir.c_str(), TRUE,
+        FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE);
+    if (h == INVALID_HANDLE_VALUE) { logf("live reload: cannot watch tex_overrides (err %lu) — restart to apply changes", GetLastError()); return 0; }
+
+    bool pump = installPump();
+    { std::vector<std::string> ignore; std::vector<LiveOp> batch;
+      rescanTree(g_overrideDir, "", true, ignore, batch);   // baseline stamps; also catches files added during loading
+      if (!batch.empty()) submitBatch(batch); }
+    logf("live reload: watching tex_overrides (%s)", pump ? "full: edits and new files" : "edits only: no main-thread pump, new files need a restart");
+
+    for (;;) {
+        DWORD w = WaitForSingleObject(h, g_journalClearAt ? 1000 : INFINITE);
+        if (g_journalClearAt && GetTickCount64() >= g_journalClearAt && !g_opsPending) {
+            DeleteFileA(g_inflightPath);   // survived the risky window; nothing to quarantine
+            g_journalClearAt = 0;
+        }
+        if (w == WAIT_TIMEOUT) continue;
+        if (w != WAIT_OBJECT_0) break;
+        do { FindNextChangeNotification(h); } while (WaitForSingleObject(h, 500) == WAIT_OBJECT_0);   // debounce until quiet
+        std::vector<std::string> xmls; std::vector<LiveOp> batch;
+        rescanTree(g_overrideDir, "", false, xmls, batch);
+        if (!batch.empty()) submitBatch(batch);
+        if (!xmls.empty()) {
+            std::vector<PlColl> fresh;
+            for (auto& f : xmls) parsePlacementXml(std::string(g_overrideDir) + f, f.c_str(), fresh);
+            if (!fresh.empty()) mergePlacement(fresh);
+        }
+    }
+    return 0;
+}
+// ========================================================================================
+
 static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asName, bool b2)
 {
     InterlockedIncrement(&g_regTotal);
@@ -415,18 +744,22 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
 
     // redirect only exact-slot matches, and only for keys the gate allows (double guard):
     // freemode-ped collection slots, or bare-name .ytd dictionaries.
-    // g_bySlot is written once at startup (before the hook is live), so this read needs no lock.
+    // g_bySlot can gain entries at runtime now (live reload), so the lookup takes the lock.
     if (!g_off && asName)
     {
         std::string key = lower(asName);
         if (isAllowedKey(key))
         {
+            const char* redirect = nullptr;
+            EnterCriticalSection(&g_cs);
             auto it = g_bySlot.find(key);
-            if (it != g_bySlot.end())
+            if (it != g_bySlot.end()) redirect = it->second;   // value is a leaked strdup — stable after release
+            LeaveCriticalSection(&g_cs);
+            if (redirect)
             {
                 InterlockedIncrement(&g_redirects);
-                if (g_redirects <= 100) logf("REDIRECT  %s  ->  tex_overrides/%s", asName, rel(it->second));
-                return o_regRaw(fileId, it->second, b1, asName, b2);
+                if (g_redirects <= 100) logf("REDIRECT  %s  ->  tex_overrides/%s", asName, rel(redirect));
+                return o_regRaw(fileId, redirect, b1, asName, b2);
             }
         }
     }
@@ -450,6 +783,8 @@ static void Setup()
     _snprintf_s(g_overrideDir, MAX_PATH, _TRUNCATE, "%s\\tex_overrides\\", plug.c_str());
     { std::string off = std::string(g_overrideDir) + "_OFF";
       g_off = (GetFileAttributesA(off.c_str()) != INVALID_FILE_ATTRIBUTES); }
+    _snprintf_s(g_inflightPath,   MAX_PATH, _TRUNCATE, "%s_inflight.txt",   g_overrideDir);
+    _snprintf_s(g_quarantinePath, MAX_PATH, _TRUNCATE, "%s_quarantine.txt", g_overrideDir);
 
     InitializeCriticalSection(&g_cs);   // must exist before the hook can fire
 
@@ -457,6 +792,7 @@ static void Setup()
     { time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
       char d[32]; strftime(d, sizeof d, "%Y-%m-%d", &tm);
       logf("================ texoverride " TEXOVERRIDE_VERSION " loaded (%s) ================", d); }
+    crashSaverStartup();   // quarantine anything a crash left in the journal, before the scan
     int n = scanDir(std::string(g_overrideDir), "");
     logf("loaded %d override(s); mode %s", n, g_off ? "OFF" : "ON");
     { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
@@ -466,7 +802,7 @@ static void Setup()
     // tattoo placement files: *.xml at the root of tex_overrides (edited overlays.xml copies)
     { WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
       if (h != INVALID_HANDLE_VALUE) {
-          do { parsePlacementXml(std::string(g_overrideDir) + fd.cFileName, fd.cFileName); } while (FindNextFileA(h, &fd));
+          do { parsePlacementXml(std::string(g_overrideDir) + fd.cFileName, fd.cFileName, g_pl); } while (FindNextFileA(h, &fd));
           FindClose(h);
       } }
     for (auto& pc : g_pl) logf("placement: collection %s — %zu preset(s) from %s", pc.name.c_str(), pc.presets.size(), pc.src.c_str());
@@ -478,6 +814,16 @@ static void Setup()
         logf("streaming manager @ %p", (void*)g_mgr);
     }
     else logf("manager pattern NOT FOUND — claims still register, but nothing can re-assert them");
+
+    // live-reload plumbing, both from Cfx's published patterns (LoadStreamingFile.cpp):
+    //   getRawStreamer          — the game's pgRawStreamer instance
+    //   pgRawStreamer::GetEntry — re-stats an entry when its timestamp is 0
+    { const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
+      if (uint8_t* q = scanModule(PAT_GRS, 19)) { if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4); }
+      const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
+      if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
+      logf("live reload: rawStreamer=%s getEntry=%s",
+           g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING"); }
 
     const short PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
     uint8_t* p = scanModule(PAT, sizeof PAT / sizeof *PAT);
@@ -558,10 +904,19 @@ static DWORD WINAPI BeatLoop(LPVOID)
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
             Sleep(1000);
+            // once streaming is live, start the live-reload watcher — before that there is
+            // nothing a change could apply to anyway
+            if (!g_watcherStarted && !g_off && g_idsReady) {
+                g_watcherStarted = true;
+                CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+            }
             // re-assert: DLC mounts and FiveM's loader re-point claimed slots after us; whoever
             // writes the handle last wins, so write ours back. Same mechanism Cfx's own override
             // path uses (LoadStreamingFile.cpp writes Entries[].handle directly).
+            // Lock held: the watcher can append to g_ovs (vector may reallocate) and swap g_pl
+            // entries under us.
             if (!g_off && g_idsReady && g_mgr && g_mgr->entries) {
+                EnterCriticalSection(&g_cs);
                 for (auto& ov : g_ovs) {
                     if (!ov.handle || ov.id >= (uint32_t)g_mgr->numEntries) continue;
                     StrEntry& e = g_mgr->entries[ov.id];
@@ -571,8 +926,13 @@ static DWORD WINAPI BeatLoop(LPVOID)
                     e.handle = ov.handle;
                     if (++g_reclaims <= 60) logf("RECLAIM  %s  (%08x -> %08x)", ov.slot, old, ov.handle);
                 }
+                LeaveCriticalSection(&g_cs);
             }
-            if (!g_off) placementBeatSafe();   // apply/re-assert tattoo placement edits
+            if (!g_off) {
+                EnterCriticalSection(&g_cs);
+                placementBeatSafe();   // apply/re-assert tattoo placement edits
+                LeaveCriticalSection(&g_cs);
+            }
         }
         logf("alive (beat %d) — reg=%ld redirects=%ld reclaims=%ld deferred=%ld baseRegistered=%s",
              beat, (long)g_regTotal, (long)g_redirects, g_reclaims, g_deferred, g_didRegister ? "yes" : "no");
@@ -586,6 +946,11 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
         Setup();   // synchronous: must finish before the game's entry point runs (see Setup)
         CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
         CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+    }
+    else if (reason == DLL_PROCESS_DETACH) {
+        // orderly exit = no crash: the live-change journal must not quarantine anything.
+        // A real crash never reaches this line, which is the whole point.
+        if (g_inflightPath[0]) DeleteFileA(g_inflightPath);
     }
     return TRUE;
 }
