@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2 (2026-08-19)
+
+- The log now reports what the whole pack costs the game in memory once everything is loaded,
+  and prints a `HEAVY` line for every file that costs 8 MB or more. Oversized or uncompressed
+  textures are the usual cause of the "stuck on low detail, textures gone, restart needed" bug
+  on busy servers, and the log now names the exact files to shrink. The README explains the bug
+  and the fix in a new section.
+
 ## 0.5.1 (2026-08-19)
 
 - The update popup now asks if you want to open the download page, and Yes opens it in your
