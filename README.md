@@ -143,7 +143,8 @@ the file, delete `_quarantine.txt` from `tex_overrides` and it loads normally ag
 ## Update check
 
 At startup the plugin asks GitHub one question: what is the newest release number? If a newer
-version is out, a small popup tells you and points to the download page. That is the plugin's
+version is out, a small popup tells you and asks if you want the download page opened. Click
+Yes and it opens in your browser. That is the plugin's
 only network use. It sends nothing about you, your game or your files, and if you are offline it
 quietly does nothing.
 

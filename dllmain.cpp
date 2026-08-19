@@ -29,7 +29,9 @@
 
 #include <windows.h>
 #include <winhttp.h>
+#include <shellapi.h>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "shell32.lib")
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -80,7 +82,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.5.0"
+#define TEXOVERRIDE_VERSION "0.5.1"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -890,10 +892,13 @@ static DWORD WINAPI UpdateCheck(LPVOID)
         char msg[256];
         _snprintf_s(msg, sizeof msg, _TRUNCATE,
             "A newer texoverride is out: %s (you have " TEXOVERRIDE_VERSION ").\n\n"
-            "Get it at:\ngithub.com/blancodagoat/texoverride/releases\n\n"
+            "Open the download page now?\n\n"
             "To turn this check off, create a file named _NO_UPDATE_CHECK in tex_overrides.",
             latest.c_str());
-        MessageBoxA(nullptr, msg, "texoverride update", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+        if (MessageBoxA(nullptr, msg, "texoverride update",
+                        MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES)
+            ShellExecuteA(nullptr, "open", "https://github.com/blancodagoat/texoverride/releases",
+                          nullptr, nullptr, SW_SHOWNORMAL);
     }
     else logf("update check: up to date (latest %s)", latest.c_str());
     return 0;

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 (2026-08-19)
+
+- The update popup now asks if you want to open the download page, and Yes opens it in your
+  browser. Before this you had to type the address yourself.
+
 ## 0.5.0 (2026-08-19)
 
 - Live reload. The plugin now watches `tex_overrides` while you play. Save an edited
