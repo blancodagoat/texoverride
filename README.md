@@ -176,8 +176,10 @@ the highest value your video card allows (Settings, Graphics) and lower Texture 
 
 ### Raising the budget past the slider
 
-The slider stops well below what a big video card can hold. If you have VRAM to spare, put a file
-named `_budget.txt` into `tex_overrides` containing just a number of GB, for example:
+The slider does not set a size. It multiplies a fixed 3 GB base, and even at maximum it lands
+around 6 GB of texture budget, the same on every card. A 24 GB card gets the same ceiling as a
+12 GB card, which is why maxing the slider often is not enough. If you have VRAM to spare, put a
+file named `_budget.txt` into `tex_overrides` containing just a number of GB, for example:
 
 ```
 8
