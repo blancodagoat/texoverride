@@ -42,6 +42,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <ctime>
+#include <algorithm>
 #include "MinHook.h"
 
 static HINSTANCE g_self;
@@ -58,6 +59,41 @@ static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
 static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
 static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH];
+
+// ---- streaming-cost audit ------------------------------------------------------------------
+// A .ytd/.ydd on disk is an RSC7 resource: dwords 2 (virtual) and 3 (physical) of the 16-byte
+// header encode the exact memory the streamer charges while the file is resident. Decode is
+// CodeWalker's GetSizeFromFlags (RpfFile.cs). Physical is the texture-budget hit — "texture
+// loss" on heavy servers is that budget running dry, so the scan totals what the pack costs
+// and names the heavy files. Threshold: 8 MB catches any 4K texture and 2K uncompressed;
+// vanilla clothing txds sit well under 2 MB.
+static uint32_t rscSizeFromFlags(uint32_t f)
+{
+    uint32_t pages = ((f >> 27) & 0x1)
+                   + (((f >> 26) & 0x1)  << 1)
+                   + (((f >> 25) & 0x1)  << 2)
+                   + (((f >> 24) & 0x1)  << 3)
+                   + (((f >> 17) & 0x7F) << 4)
+                   + (((f >> 11) & 0x3F) << 5)
+                   + (((f >> 7)  & 0xF)  << 6)
+                   + (((f >> 5)  & 0x3)  << 7)
+                   + (((f >> 4)  & 0x1)  << 8);
+    return (0x200u << (f & 0xF)) * pages;
+}
+static bool rscCost(const char* path, uint64_t* virt, uint64_t* phys)
+{
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, path, "rb") || !fp) return false;
+    uint32_t h[4] = {};
+    size_t got = fread(h, sizeof(uint32_t), 4, fp);
+    fclose(fp);
+    if (got != 4 || h[0] != 0x37435352) return false;   // 'RSC7'
+    *virt = rscSizeFromFlags(h[2]);
+    *phys = rscSizeFromFlags(h[3]);
+    return true;
+}
+static uint64_t g_costVirt, g_costPhys;
+static std::vector<std::pair<uint64_t, std::string>> g_costBig;   // files >= 8 MB in memory
 
 // rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
 // loader actually opens; layout from Cfx's gta-streaming-five/include/Streaming.h.
@@ -82,7 +118,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.5.1"
+#define TEXOVERRIDE_VERSION "0.5.2"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -156,6 +192,11 @@ static int scanDir(const std::string& base, const std::string& rel)
                 g_ovs.push_back({ slot, file });
                 g_bySlot[slot] = file;
                 ++n;
+                uint64_t cv = 0, cp = 0;
+                if (rscCost(file, &cv, &cp)) {
+                    g_costVirt += cv; g_costPhys += cp;
+                    if (cv + cp >= (8u << 20)) g_costBig.push_back({ cv + cp, slotStr });
+                }
             }
         }
     } while (FindNextFileA(h, &fd));
@@ -466,6 +507,9 @@ static void drainOps()   // runs on the game's main thread
                 g_ovs.push_back(op.ov); g_bySlot[op.ov.slot] = op.ov.file;
                 LeaveCriticalSection(&g_cs);
                 logf("LIVE-ADD  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+                uint64_t cv = 0, cp = 0;
+                if (rscCost(op.ov.file, &cv, &cp) && cv + cp >= (8u << 20))
+                    logf("  HEAVY %.1f MB in memory — likely 4K or uncompressed; shrink it to fight texture loss", (cv + cp) / 1048576.0);
             } else {
                 logf("live reload: could not register %s, restart to pick it up", op.ov.slot);
                 free((void*)op.ov.slot); free((void*)op.ov.file);
@@ -800,6 +844,14 @@ static void Setup()
     { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
       for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
       for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
+    if (g_costVirt + g_costPhys) {
+        logf("pack cost when fully loaded: %.1f MB of texture memory + %.1f MB other. Vanilla clothing files stay well under 2 MB each; a heavy pack feeds the \"stuck on low detail / textures gone\" bug on busy servers.",
+             g_costPhys / 1048576.0, g_costVirt / 1048576.0);
+        std::sort(g_costBig.rbegin(), g_costBig.rend());
+        for (size_t i = 0; i < g_costBig.size() && i < 20; ++i)
+            logf("  HEAVY %6.1f MB  %s — likely 4K or uncompressed; shrink it to fight texture loss", g_costBig[i].first / 1048576.0, g_costBig[i].second.c_str());
+        if (g_costBig.size() > 20) logf("  ...and %zu more file(s) over 8 MB", g_costBig.size() - 20);
+    }
 
     // tattoo placement files: *.xml at the root of tex_overrides (edited overlays.xml copies)
     { WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);

@@ -154,6 +154,26 @@ One honest limit: when FiveM moves to a new game build, old plugin versions stop
 (see [The build stamp](#the-build-stamp)). A plugin that does not load cannot show a popup, so
 after a big game update, check the releases page yourself.
 
+## Textures gone, everything stuck on low detail
+
+On busy servers GTA sometimes gets stuck like this: buildings turn into grey blobs, textures
+vanish, and only a game restart fixes it. That happens when the game's texture memory runs out.
+The game never frees memory ahead of time, so once the budget is full it stays full. Heavy
+servers can hit this on their own, with no mods at all.
+
+Big override files make it worse. A texture saved at 4K, or saved without compression, can cost
+the game 20 to 90 MB where the original cost 1 MB. A few of those on screen and the budget dies.
+
+The plugin now measures this for you. At startup the log prints a line like
+`pack cost when fully loaded: 240.0 MB of texture memory`, and below it a `HEAVY` line for every
+file that costs 8 MB or more. Those files are the ones to fix: open them in a tool like
+OpenIV or CodeWalker, resize the textures to what the original used (clothing is usually
+512 to 1024 pixels), and save them DXT compressed. Smaller files look nearly identical on a
+character and leave the rest of the game room to breathe.
+
+If it still happens with a light pack, it is the server, not you. Set Extended Texture Budget to
+the highest value your video card allows (Settings, Graphics) and lower Texture Quality one step.
+
 ## Turning it off
 
 Create an empty file named `_OFF` (no file extension) inside `tex_overrides` and restart FiveM.
@@ -169,6 +189,8 @@ launch.
 | `texoverride x.y.z loaded (date)` | The plugin is in and running |
 | `loaded N override(s)` | Your files were found |
 | indented `collection N file(s)` lines | How your files were grouped |
+| `pack cost when fully loaded: ...` | What your files cost the game in memory |
+| `HEAVY x MB file` | That file is oversized; shrink it to avoid texture loss |
 | `placement: collection ... N preset(s)` | Your edited `.xml` was read |
 | `placement: ... layout solved` | The `.xml` matched the game; changes can be applied |
 | `streaming manager @ ...` | Internal: found what it needs to keep overrides in place |
