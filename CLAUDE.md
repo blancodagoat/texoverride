@@ -163,14 +163,21 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   feature.
   **The "no silent default" rule was reversed by the user 2026-08-20** after reports that texture
   loss hits high-end PCs identically. It does, and the reason is that FiveM's ceiling has NO VRAM
-  term: `SetGamePhysicalBudget(3 * 1000000000)` x `(vid_budgetScale/12 + 1)`, slider console-locked,
-  so every machine sits at ~2.8 GiB. The old objection (past real VRAM, D3D11 demotes and stutters)
+  term: `SetGamePhysicalBudget(3 * GB)` x `(vid_budgetScale/12 + 1)`, where **`GB` in that file is
+  `1000 * 1024 * 1024`**, not 1e9 and not 1<<30. Slider defaults to 0 -> 3145728000 = 2.93 GiB;
+  maxed at 20 -> 8388608000 = 7.81 GiB (both verified against real logs, do not re-derive). The
+  slider IS user-settable in Settings > Graphics; only the convar is console-locked. A 24 GB card
+  and an 8 GB card get the identical ceiling at every setting. The old objection (past real VRAM, D3D11 demotes and stutters)
   is now answered by the OS instead of a guess: `probeVram()` reads
   `IDXGIAdapter3::QueryVideoMemoryInfo(0, LOCAL).Budget` — WDDM's own per-process figure, which
   already subtracts everything else on the GPU, and which MSDN says is exactly the line past which
   a process gets paged out and stutters. `autoBudget()` holds back `max(25%, 1.5 GiB)` of that,
   quantizes to 256 MB, and returns 0 (no change) when it would not beat what FiveM already set.
-  Probed ONCE at startup, not per beat — see the `ponytail:` note on `autoBudget` for the upgrade
+  **`probeVram()` MUST NOT run from `Setup()`**: that is inside DllMain, under the loader lock, and
+  DXGI factory creation there comes back empty. 0.7.0 shipped that way and every log said "cannot
+  read this card's memory"; the 0.6.x opt-in path had the same latent bug, invisible because a zero
+  only skipped a clamp. `decideBudget()` now runs it from the top of `BeatLoop`, the first code off
+  the lock. Probed ONCE there, not per beat — see the `ponytail:` note on `autoBudget` for the upgrade
   path if alt-tabbing turns into stutter reports. `_budget.txt` still overrides; `0` in it disables.
 
 ## The overlay index (docs/overlay_index.tsv)

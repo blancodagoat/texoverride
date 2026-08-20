@@ -179,10 +179,11 @@ the highest value your video card allows (Settings, Graphics) and lower Texture 
 
 ### The budget, and why a good graphics card does not save you
 
-The Extended Texture Budget slider does not set a size. It multiplies a fixed 3 GB base, and even
-at maximum it lands around 6 GB, the same on every card. There is no video memory anywhere in that
-sum. A 24 GB card gets the same ceiling as a 4 GB card, which is why this bug shows up on expensive
-builds too and why maxing the slider often is not enough.
+The Extended Texture Budget slider does not set a size. It multiplies a fixed base of about 2.9 GB,
+and at its maximum setting it lands at about 7.8 GB. Those are the only two numbers that matter,
+and your graphics card is in neither of them. A 24 GB card gets the same 7.8 GB ceiling as an 8 GB
+card, which is why this bug shows up on expensive builds too and why maxing the slider is often not
+enough on its own. Max it anyway, it is free, but it stops there.
 
 The plugin fixes that for you. On startup it asks Windows how much video memory it is willing to
 give the game right now, holds back a quarter of that (or 1.5 GB, whichever is more) for the parts
@@ -190,7 +191,7 @@ of the game that are not textures, and raises the ceiling to whatever is left. Y
 set anything. The log line looks like this:
 
 ```
-budget: sized to this PC - 17.0 GB, up from the 2.8 GB the game gives every machine
+budget: sized to this PC - 18.0 GB, up from the 7.8 GB the game set
         (card 24.0 GB, Windows is offering this process 23.2 GB right now)
 ```
 
