@@ -171,13 +171,21 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   is now answered by the OS instead of a guess: `probeVram()` reads
   `IDXGIAdapter3::QueryVideoMemoryInfo(0, LOCAL).Budget` — WDDM's own per-process figure, which
   already subtracts everything else on the GPU, and which MSDN says is exactly the line past which
-  a process gets paged out and stutters. `autoBudget()` holds back `max(25%, 1.5 GiB)` of that,
+  a process gets paged out and stutters. `autoBudget()` holds back `max(12.5%, 2 GiB)` of that (a quarter was double-counting: the
+  figure DXGI returns is ALREADY this process's share, and on a real 11.7 GB machine it produced a
+  raise of 0.2 GB over what the game had set),
   quantizes to 256 MB, and returns 0 (no change) when it would not beat what FiveM already set.
   **`probeVram()` MUST NOT run from `Setup()`**: that is inside DllMain, under the loader lock, and
   DXGI factory creation there comes back empty. 0.7.0 shipped that way and every log said "cannot
   read this card's memory"; the 0.6.x opt-in path had the same latent bug, invisible because a zero
-  only skipped a clamp. `decideBudget()` now runs it from the top of `BeatLoop`, the first code off
-  the lock. Probed ONCE there, not per beat — see the `ponytail:` note on `autoBudget` for the upgrade
+  only skipped a clamp. Worse in the field: one 0.7.0 player logged `FAULT during startup
+  C0000005` with the log stopping exactly at the budget block, and another crashed with a
+  crash_hash of `gtavupscaler.asi+6616FB` — an unrelated ASI that also hooks DXGI. That player kept
+  the upscaler, moved to 0.7.1, and stopped crashing. Forcing DXGI to initialise under the loader
+  lock while another plugin wires up its own DXGI hooks is the mechanism for both, and Cfx blames
+  whichever module the fault address lands in, not the trigger. `decideBudget()` now runs it from
+  the top of `BeatLoop`, the first code off the lock, and is SEH-wrapped since 0.7.2 (out there a
+  fault kills the game, not just the plugin). Probed ONCE there, not per beat — see the `ponytail:` note on `autoBudget` for the upgrade
   path if alt-tabbing turns into stutter reports. `_budget.txt` still overrides; `0` in it disables.
 
 ## The overlay index (docs/overlay_index.tsv)
