@@ -328,16 +328,48 @@ UNVERIFIED numbers nobody should re-derive: NUM_DECORATION_BITFIELDS, the sorted
 stride, kMaxCompressedTextures / kMax*BloodRenderTargets / kInvalidPedDamageSet, FindSlot absolute
 vtable indices (the +6 shift on builds >= 2802 is verified, the absolute index is not).
 
-## Client-side audio data files — attempted 2026-08-21, DOES NOT WORK, do not retry
+## Client-side audio DLCs — SOLVED, and my first conclusion here was WRONG
+
+**CORRECTION (2026-08-21, same day).** An earlier version of this section said client-side audio
+DLCs were impossible on FiveM. That was wrong, and the error was mine: I only ever tested `<add>`
+NESTED INSIDE `<archive>`, concluded from that the mods folder could only insert into archives that
+already exist, and never tried the bare form. A publicly distributed pack proved otherwise.
+
+**THE WORKING RECIPE.** A mods-folder package with a top-level `<add>` — no `<archive>` parent —
+whose target is a game-relative path under dlcpacks:
+
+```xml
+<content>
+<add source="ragengineports.rpf">updated\dlcpacks\mods\dlc.rpf</add>
+</content>
+```
+
+Package layout: `<pkg>.rpf` (OPEN encryption) containing `assembly.xml` plus `content/<dlc>.rpf`,
+where `source` is relative to `content/`. No vanilla dlcpack is named `mods`, so this CREATES a slot
+rather than replacing one, and it needs no dlclist edit. Drop the package in `FiveM.app/mods/`.
+Requires pure mode off, same as every other mods-folder package.
+Known limitation reported by the pack author: some VANILLA vehicles cannot take custom sound this
+way; DLC and add-on vehicles work fine. Consistent with the dlcpack mounting after the base
+game.dat has already defined those vehicles.
+
+So: the dlcpack route is NOT closed the way the notes below claim. What IS closed is the Arxan
+archive-count limit, dlclist edits, and hash validation of the REAL `update/x64/dlcpacks/` folder on
+disk — none of which this touches, because it all happens inside FiveM's virtual view.
+
+The rest of this section is the failed ASI attempt. Its findings about the game's data file mounters
+are still accurate and reusable, but it is no longer the route anyone should take.
+
+## The failed ASI route — attempted 2026-08-21, do not retry
 
 Goal: play a vehicle-audio DLC (132 cars) client-side on FiveM. Everything below was proven by
 experiment on b3751; the conclusion is negative but most of the machinery is correct and reusable.
 
-**Why the obvious routes are closed.** FiveM cannot mount a client-side dlcpack: archive count is
-hard-coded and Arxan-guarded, `dlcpacks/` is hash-validated, and Cfx rejected dlclist edits outright
-(iridium: "Not going to happen. DLCs load too early"). The mods folder cannot help either — its
-parser vocabulary is literally only `package/Five/content/archive/path/add/source`, so it inserts
-files into EXISTING archives and nothing more. Converting the DLC by merging into vanilla fails on
+**What I wrongly believed at the time.** That FiveM cannot mount a client-side dlcpack at all. The
+Arxan count limit, the dlclist refusal and the `dlcpacks/` hash validation are all real, but they
+apply to the on-disk game folder, NOT to a file placed through the mods-folder VFS — see the
+correction above. The parser vocabulary really is only
+`package/Five/content/archive/path/add/source`, but `add` works at the top level of `content` with a
+game-relative target, which is the whole trick and which I never tested. Converting the DLC by merging into vanilla fails on
 name tables: Dat54 entries reference banks by index into their OWN file's table, so concatenating
 `RelDatas` silently mis-points every entry. FiveM never merges; it registers each file separately.
 
