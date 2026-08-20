@@ -327,3 +327,64 @@ must agree, so fixing one client swaps missing tattoos for wrong tattoos on wron
 UNVERIFIED numbers nobody should re-derive: NUM_DECORATION_BITFIELDS, the sorted index array
 stride, kMaxCompressedTextures / kMax*BloodRenderTargets / kInvalidPedDamageSet, FindSlot absolute
 vtable indices (the +6 shift on builds >= 2802 is verified, the absolute index is not).
+
+## Client-side audio data files — attempted 2026-08-21, DOES NOT WORK, do not retry
+
+Goal: play a vehicle-audio DLC (132 cars) client-side on FiveM. Everything below was proven by
+experiment on b3751; the conclusion is negative but most of the machinery is correct and reusable.
+
+**Why the obvious routes are closed.** FiveM cannot mount a client-side dlcpack: archive count is
+hard-coded and Arxan-guarded, `dlcpacks/` is hash-validated, and Cfx rejected dlclist edits outright
+(iridium: "Not going to happen. DLCs load too early"). The mods folder cannot help either — its
+parser vocabulary is literally only `package/Five/content/archive/path/add/source`, so it inserts
+files into EXISTING archives and nothing more. Converting the DLC by merging into vanilla fails on
+name tables: Dat54 entries reference banks by index into their OWN file's table, so concatenating
+`RelDatas` silently mis-points every entry. FiveM never merges; it registers each file separately.
+
+**What was built.** Register the audio files individually with the game's own data file mounters,
+the way FiveM's `data_file` lines do, so `audMetadataDataFileMounter` / `audWavePackDataFileMounter`
+parse the .rel and wave packs natively. All anchors are published in Cfx LoadStreamingFile.cpp.
+
+**PROVEN CORRECT (reuse freely):**
+- `g_dataFileTypes` = data pattern `61 44 DF 04 00 00 00 00`, array of `{uint32 hash, uint32 index}`.
+  **It lives in .rdata**, so a scanner that only walks IMAGE_SCN_MEM_EXECUTE sections will never find
+  it — hence `scanModuleData()`.
+- The table is keyed by the **case-SENSITIVE** joaat of the UPPERCASE type name (`joaatCS`). Our
+  ordinary `joaat()` case-folds and does NOT work here. Cfx uppercases before hashing, which is the
+  tell. Verified: `AUDIO_WAVEPACK` -> index 144, `type[0] hash=04DF4461`.
+- `sm_Interfaces` = `imagebase + *(int32_t*)(pattern "48 63 82 90 00 00 00 49 8B 8C C0 ? ? ? ? 48" + 11)`.
+  The instruction is `mov rcx,[r8+rax*8+disp32]`, so this only works because r8 == image base there;
+  on b3751 it does. Confirmed by the audio mounters appearing at the right indices.
+- The table is filled by the GAME progressively during session init: entirely zero for ~15s after
+  the plugin loads, audio mounters present around try 14-24 of a 1Hz poll. Poll for the SPECIFIC
+  types needed, not for "any mounter".
+- `CDataFileMgr::DataFile` layout and vtable slot 1 for `LoadDataFile` are right — the call reaches
+  the real function and runs four frames deep into game code.
+- `fiDevice::GetDevice` pattern `41 B8 07 00 00 00 48 8B F1 E8` at -0x1F. NOTE: it returns the
+  DEVICE for a path prefix, it does NOT test file existence. Cfx uses
+  `device->GetFileAttributes(name) != -1` for that. Do not mistake "RESOLVES" for "file is there".
+- Paths must be RAGE paths. `citizen:/` is mounted by FiveM via fiDeviceRelative to
+  `FiveM.app/citizen`, so dropping files there makes them addressable with zero new patterns —
+  no need for the fiDeviceRelative vtable/object size, which are not published.
+
+**WHERE IT DIES.** `LoadDataFile` on a loose-folder path crashes inside the game's audio loader:
+`GTA5_b3751.exe+1308CDD <- +1308CB5 <- +1302979 <- +130284D <- +36FD68 <- texoverride`.
+Control experiment that settles it: mounting `lambov10_game.dat151.rel` from the Aquaphobic pack,
+a file that demonstrably works as a FiveM audio resource on live servers, produces the IDENTICAL
+crash signature. So the files, the merge, the missing .nametable sidecars and the DLC extraction are
+all innocent. A loose folder is not a resource; FiveM does something more when mounting one, and
+that gap is past where its published source goes.
+
+**Two rules learned the hard way:**
+- Data file mounting MUST run on the game's main thread (our PeekMessageW pump). The beat thread has
+  no RAGE allocator TLS. This is the same rule already written above for live reload.
+- **NEVER wrap a call INTO game code that mutates engine state in SEH.** Catching the access
+  violation aborts the game's mounter half way through, the plugin carries on as if fine, and the
+  game dies minutes later looking like somebody else's bug — one attempt caught 66 faults, wedged
+  loading at 70%, then CTD'd the machine. SEH is for READING memory that might be unmapped. A wrong
+  call should crash at the call site, immediately and honestly.
+
+Deliverable if this is ever wanted again: it is a FiveM SERVER RESOURCE, which is a supported path
+and about an hour of work (`data_file AUDIO_GAMEDATA/AUDIO_SOUNDDATA/AUDIO_SYNTHDATA/AUDIO_WAVEPACK`,
+one wave pack folder per container, configs kept separate and never merged). Singleplayer installs
+the dlc.rpf as-is. RAGE MP also loads it as-is, which is why the pack works there and not here.
