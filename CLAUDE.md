@@ -112,6 +112,14 @@ Why not applied (from GameSource + Rockstar's own .psc parser schema):
 
 ## Live reload (v0.5.0)
 
+A file added mid-session whose name the CONNECTED SERVER already streams cannot be claimed:
+`registerRawStreamingFile` refuses a slot that already holds a handle, so `liveRegister` gets
+id=0xFFFFFFFF. Cfx hits the same wall and answers it by writing pgRawStreamer handles straight into
+the entry (LoadStreamingFile.cpp: `handle == 0` -> register, else overwrite + handle stack). We have
+no `pgRawStreamer::RegisterFile` pattern to mint a handle with, so the log tells the user to restart
+(startup claims the slot before the server mounts). Investigated and DECLINED as not worth a new
+pattern 2026-08-20; do not re-diagnose this as a bug.
+
 A watcher thread (spawned from BeatLoop once g_idsReady) sits on FindFirstChangeNotification over
 tex_overrides — event-driven, no polling; 500ms debounce, then one rescan. Three change kinds:
 edited root .xml re-parses and merges into g_pl (solved layout carried over when preset hashes
@@ -145,14 +153,25 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   (`rscSizeFromFlags` in dllmain.cpp — pages sum x (0x200 << shift)). scanDir totals it, logs
   `pack cost when fully loaded` + `HEAVY` lines for files >= 8 MB (catches 4K anything and 2K
   uncompressed; vanilla clothing txds are under 2 MB).
-- **Budget raiser (0.6.0, opt-in)**: the budget is a data table in GTA5.exe — 20 rows x 4 uint64
+- **Budget raiser (0.6.0 opt-in, AUTO by default since 0.7.0)**: the budget is a data table in GTA5.exe — 20 rows x 4 uint64
   (half / 1.5th / full / full per texture-quality tier). FiveM fills it in
   PatchExtendedBudgeting.cpp (3 GB x slider multiplier, slider = vid_budgetScale, console-locked
   in production) and rewrites it on settings changes. `_budget.txt` in tex_overrides (a number of
   GB) -> pattern `4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14` (address at +6, Cfx's own), sanity check
   the row shape before any write (`vramTableSane`, SEH), clamp to DXGI dedicated VRAM, then
   re-assert each beat (`budgetBeat`). Aligned 8-byte data writes only; fault disables just this
-  feature. Do not add a silent default — past real VRAM D3D11 demotes to system RAM and stutters.
+  feature.
+  **The "no silent default" rule was reversed by the user 2026-08-20** after reports that texture
+  loss hits high-end PCs identically. It does, and the reason is that FiveM's ceiling has NO VRAM
+  term: `SetGamePhysicalBudget(3 * 1000000000)` x `(vid_budgetScale/12 + 1)`, slider console-locked,
+  so every machine sits at ~2.8 GiB. The old objection (past real VRAM, D3D11 demotes and stutters)
+  is now answered by the OS instead of a guess: `probeVram()` reads
+  `IDXGIAdapter3::QueryVideoMemoryInfo(0, LOCAL).Budget` — WDDM's own per-process figure, which
+  already subtracts everything else on the GPU, and which MSDN says is exactly the line past which
+  a process gets paged out and stutters. `autoBudget()` holds back `max(25%, 1.5 GiB)` of that,
+  quantizes to 256 MB, and returns 0 (no change) when it would not beat what FiveM already set.
+  Probed ONCE at startup, not per beat — see the `ponytail:` note on `autoBudget` for the upgrade
+  path if alt-tabbing turns into stutter reports. `_budget.txt` still overrides; `0` in it disables.
 
 ## The overlay index (docs/overlay_index.tsv)
 
@@ -177,6 +196,20 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
   technical. The audience is ordinary FiveM players, not developers.
 - **No AI attribution in commits/PRs** (global user rule): never add Co-Authored-By, Claude-Session,
   or any AI trailer. Plain commit messages.
+- **The user ships under the handle `blancodagoat` only. Never put their real name, email, or
+  local paths in the repo, the version resource, LICENSE, or anything shipped.** Stated 2026-08-20:
+  doxxing is a real risk in the FiveM community. If code signing ever comes up, an OV/EV cert on an
+  individual publishes their legal name in every signature; signing under a registered entity puts
+  the entity name there instead. Verified clean 2026-08-20: no email or user paths in tracked files,
+  no build paths in the binary (no /Zi, so no PDB path), commits use the GitHub noreply address.
+- **AV false positives are expected and are never worked around.** RWX trampoline memory
+  (minhook buffer.c), a 5-byte inline patch into GTA5.exe, module pattern scanning, an unsigned
+  low-prevalence PE: every generic-trojan heuristic at once. `texoverride.rc` carries a version
+  resource since 0.7.0 (its absence was itself a Defender ML weighting factor) and the README has a
+  "Why your antivirus may call it a trojan" section pointing at VirusTotal, the public CI build,
+  self-building, and Microsoft's FP submission form. NEVER obfuscate, pack, or otherwise evade
+  detection: it makes scores worse and it destroys the readable-source argument the project rests
+  on. Code signing is the only real fix and costs money; not proposed unless the user raises it.
 - The "Ban risk, stated plainly" README section stays — the 5-byte patch lives in game code all
   session and a scan can flag it; the honest disclosure is what makes the project credible.
 
@@ -186,7 +219,8 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
   no /clr. The user's shell prints `fastfetch`/`vswhere` noise and exits nonzero even on success;
   trust the `Built texoverride.asi` line, not the exit code.
 - `.asi` is gitignored — CI builds it and attaches it to the GitHub Release. Never commit the .asi.
-- Release: bump `TEXOVERRIDE_VERSION` in dllmain.cpp, date the CHANGELOG section, commit, push,
+- Release: bump `TEXOVERRIDE_VERSION` in dllmain.cpp AND `FILEVERSION`/`PRODUCTVERSION`/the two
+  version strings in `texoverride.rc` (they must match), date the CHANGELOG section, commit, push,
   `git tag vX.Y.Z`, push the tag. CI builds both the push and the tag; the tag build makes the
   release with the changelog notes + the .asi.
 - **The FX_ASI_BUILD stamp** (`texoverride.rc`): FiveM refuses ASIs on game build 2189+ that don't

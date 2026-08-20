@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.0 (2026-08-20)
+
+- The texture budget now sizes itself to your PC instead of leaving everyone on the same fixed
+  ceiling. GTA gives every machine the same roughly 3 GB for textures no matter what card is in
+  it, which is why the "textures gone, stuck on low detail, restart needed" bug hits high end
+  builds just as hard as cheap ones. The plugin now asks Windows how much video memory it is
+  willing to hand this process, holds back a quarter of it (or 1.5 GB, whichever is more) for the
+  rest of the game, and raises the ceiling to what is left. Nothing to configure. Cards with
+  little to spare are left alone.
+- `_budget.txt` still works and still wins if you want to pick the number yourself. Put a 0 in it
+  to switch the whole thing off and leave the game's budget untouched.
+- The pack cost report now says whether the raised ceiling actually covers your pack, and stops
+  implying a bigger graphics card would have saved you.
+- Releases are now signed with build provenance and list the file's SHA-256, so you can prove a
+  download came from this repository and was built from this code rather than taking anyone's word
+  for it. The README shows the one command that checks it. This does not change antivirus warnings,
+  which need a paid certificate; it does mean a tampered copy from somewhere else fails the check.
+- The file now carries proper version details, so right clicking it and looking at Properties
+  shows what it is and where it came from. A file with no details at all counts against it with
+  Windows Defender, which is part of why some people saw a trojan warning on a fresh release. The
+  README now has a section explaining those warnings and what to do about one.
+- Clearer message when a file added while the game is running cannot be picked up. The game will
+  not hand over a name the server or a DLC has already loaded, so a restart is the only way to
+  claim it. The old wording made that sound like a plugin failure and left the impression that
+  live reload was not working, when editing files the plugin already owns, and tattoo placement
+  edits, apply live as they always did. The log now separates the three reasons a live add can
+  fail instead of lumping them into one line.
+
 ## 0.6.3 (2026-08-20)
 
 - The crash-size check now covers mesh data as well as texture data. A player's crash dump
