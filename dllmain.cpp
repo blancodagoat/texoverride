@@ -153,7 +153,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.7.1"
+#define TEXOVERRIDE_VERSION "0.7.2"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -1019,8 +1019,12 @@ static void budgetBeatImpl()
         logf("texture budget: %.1f -> %.1f GB%s", old / 1073741824.0, g_budget / 1073741824.0,
              g_budgetWrites == 1 ? "" : " (re-asserted; the settings screen rewrote it)");
 }
-// Runs once, on the beat thread, because DXGI does not work under DllMain's loader lock.
-static void decideBudget()
+// Runs once, on the beat thread, because DXGI does not work under DllMain's loader lock. A
+// 0.7.0 crash report proved the stronger version of that: calling it from Setup() did not merely
+// come back empty on one player's machine, it took an access violation and disabled the whole
+// plugin. Out here a fault would kill the game instead of the plugin, so decideBudget is wrapped
+// the same way the placement and budget writes are.
+static void decideBudgetImpl()
 {
     if (!g_vramTable) return;              // nothing to write into; Setup already said so
     if (g_budgetWant == 0.0) return;       // _budget.txt said leave it alone
@@ -1051,6 +1055,15 @@ static void decideBudget()
     else
         logf("budget: the %.1f GB the game already gives is as much as this card can spare, leaving it alone (card %.1f GB, Windows is offering %.1f GB)",
              g_budgetCurr / 1073741824.0, g_vramTotal / 1073741824.0, g_vramBudget / 1073741824.0);
+}
+static void decideBudget()
+{
+    __try { decideBudgetImpl(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_budget = 0;
+        logf("budget: FAULT reading this card (code %08X) — texture budget left as the game set it, everything else still works",
+             (unsigned)GetExceptionCode());
+    }
 }
 
 static void budgetBeat()
