@@ -30,10 +30,10 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
-#include <dxgi.h>
+#include <dxgi1_4.h>   // IDXGIAdapter3::QueryVideoMemoryInfo: Windows' own per-process VRAM budget
 // no dxgi import lib: a static import resolves against the APPLICATION directory first, and a
 // ReShade/ENB dxgi.dll in the FiveM folder then breaks the load of this whole plugin with
-// "Couldn't load texoverride.asi". dedicatedVram() loads the real one from System32 instead.
+// "Couldn't load texoverride.asi". probeVram() loads the real one from System32 instead.
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 #include <string>
@@ -99,6 +99,7 @@ static bool rscCost(const char* path, uint64_t* virt, uint64_t* phys)
     *phys = rscSizeFromFlags(h[3]);
     return true;
 }
+static void probeVram();   // defined with the budget raiser below; fills g_vramTotal/g_vramBudget
 static uint64_t g_costVirt, g_costPhys;
 static std::vector<std::pair<uint64_t, std::string>> g_costBig;   // files >= 8 MB in memory
 
@@ -152,7 +153,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.6.3"
+#define TEXOVERRIDE_VERSION "0.7.0"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -513,17 +514,20 @@ static bool rawInvalidate(uint32_t handle)
 
 // Register one new file mid-session, same call and flags as the startup pass. SEH: a fault here
 // must not take the game down; worst case the file just is not picked up.
-static bool liveRegister(Ov& ov)
+// Returns why it failed, because the three reasons need three different answers:
+//   0 ok  1 slot already owned  2 registered but no handle came back  3 fault
+static int liveRegister(Ov& ov)
 {
     __try {
         uint32_t id = 0xFFFFFFFF;
         o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
         ov.id = id;
+        if (id == 0xFFFFFFFF) return 1;   // the game refuses a slot that already holds a handle
         if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
             ov.handle = g_mgr->entries[id].handle;
-        return ov.id != 0xFFFFFFFF && ov.handle != 0;
+        return ov.handle ? 0 : 2;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 3; }
 }
 
 // ---- main-thread pump: IAT shim on the game exe's PeekMessageW import ----
@@ -538,7 +542,8 @@ static void drainOps()   // runs on the game's main thread
     LeaveCriticalSection(&g_cs);
     for (auto& op : ops) {
         if (op.kind == 0) {
-            if (liveRegister(op.ov)) {
+            int why = liveRegister(op.ov);
+            if (why == 0) {
                 EnterCriticalSection(&g_cs);
                 g_ovs.push_back(op.ov); g_bySlot[op.ov.slot] = op.ov.file;
                 LeaveCriticalSection(&g_cs);
@@ -546,8 +551,20 @@ static void drainOps()   // runs on the game's main thread
                 uint64_t cv = 0, cp = 0;
                 if (rscCost(op.ov.file, &cv, &cp) && cv + cp >= (8u << 20))
                     logf("  HEAVY %.1f MB in memory — likely 4K or uncompressed; shrink it to fight texture loss", (cv + cp) / 1048576.0);
+            } else if (why == 1) {
+                // registerRawStreamingFile refuses a slot that already holds a handle, so a
+                // name the connected server or a DLC already streams cannot be claimed this way.
+                // Cfx hits the same wall and answers it by writing pgRawStreamer handles straight
+                // into the entry (LoadStreamingFile.cpp: handle == 0 -> register, otherwise
+                // overwrite + handle stack). We have no RegisterFile pattern to mint a handle
+                // with, so a restart, which claims the slot before any of that mounts, is the
+                // honest answer. Only brand-new NAMES are affected: editing a file the plugin
+                // already owns goes down the re-stat path and still applies live.
+                logf("live reload: %s is already loaded from the server or a DLC, and the game will not hand a name over while it runs. Restart FiveM and the plugin claims it at startup, before those mount. Editing files it already owns still applies live.", op.ov.slot);
+                free((void*)op.ov.slot); free((void*)op.ov.file);
             } else {
-                logf("live reload: could not register %s, restart to pick it up", op.ov.slot);
+                logf("live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
+                     why == 2 ? "no handle came back" : "fault inside the game's register call");
                 free((void*)op.ov.slot); free((void*)op.ov.file);
             }
         } else {
@@ -876,7 +893,7 @@ static uint64_t  g_budget = 0;              // requested bytes; 0 = feature off
 static volatile LONG g_budgetFault = 0;
 static long g_budgetWrites = 0;
 
-static bool vramTableSane(uint64_t* t)      // refuse to write unless it looks like Cfx filled it
+static bool vramTableSane(uint64_t* t, uint64_t* cur)   // refuse to write unless it looks like Cfx filled it
 {
     __try {
         for (int i = 0; i < 80; i += 4) {
@@ -884,11 +901,22 @@ static bool vramTableSane(uint64_t* t)      // refuse to write unless it looks l
             if (full != t[i + 2] || full < (1ull << 30) || full > (48ull << 30) || t[i] >= full)
                 return false;
         }
+        *cur = t[3];                        // what FiveM set: 3e9 x (vid_budgetScale/12 + 1)
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-static uint64_t dedicatedVram()             // biggest hardware adapter; 0 when unknowable
+// One DXGI probe, two numbers, both 0 when unknowable:
+//   g_vramTotal  — the card's physical VRAM (biggest hardware adapter)
+//   g_vramBudget — what Windows is willing to give THIS process right now. WDDM works it out
+//                  itself, so it already subtracts the desktop, the browser, and anything else
+//                  on the GPU. Microsoft is blunt about the other side of it: a process that
+//                  runs past its budget "will likely experience stuttering, as they are
+//                  intermittently frozen and paged-out". That is the exact failure the old
+//                  opt-in rule was guarding against, so this is the number to size against
+//                  rather than a fraction guessed from the card's sticker capacity.
+static uint64_t g_vramTotal = 0, g_vramBudget = 0;
+static void probeVram()
 {
     // dxgi loaded by FULL System32 path: a static import (or a bare-name load) binds to any
     // already-loaded ReShade/ENB proxy dxgi.dll, and a proxy missing CreateDXGIFactory1 used
@@ -896,24 +924,68 @@ static uint64_t dedicatedVram()             // biggest hardware adapter; 0 when 
     typedef HRESULT (WINAPI* CreateFactory_t)(REFIID, void**);
     char dxPath[MAX_PATH + 16];
     UINT sl = GetSystemDirectoryA(dxPath, MAX_PATH);
-    if (sl == 0 || sl >= MAX_PATH) return 0;
+    if (sl == 0 || sl >= MAX_PATH) return;
     strcat_s(dxPath, "\\dxgi.dll");
     HMODULE dx = LoadLibraryA(dxPath);
-    if (!dx) return 0;
+    if (!dx) return;
     auto createFactory = (CreateFactory_t)GetProcAddress(dx, "CreateDXGIFactory1");
-    if (!createFactory) return 0;
+    if (!createFactory) return;
 
-    uint64_t best = 0; IDXGIFactory1* f = nullptr;
-    if (FAILED(createFactory(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return 0;
-    IDXGIAdapter1* a = nullptr;
+    IDXGIFactory1* f = nullptr;
+    if (FAILED(createFactory(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return;
+    IDXGIAdapter1* a = nullptr; IDXGIAdapter1* best = nullptr;
     for (UINT i = 0; f->EnumAdapters1(i, &a) == S_OK; ++i) {
         DXGI_ADAPTER_DESC1 d;
-        if (SUCCEEDED(a->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && d.DedicatedVideoMemory > best)
-            best = d.DedicatedVideoMemory;
+        if (SUCCEEDED(a->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) && d.DedicatedVideoMemory > g_vramTotal) {
+            g_vramTotal = d.DedicatedVideoMemory;
+            if (best) best->Release();
+            best = a; continue;
+        }
         a->Release();
     }
+    if (best) {
+        IDXGIAdapter3* a3 = nullptr;   // DXGI 1.4, so Windows 10 and up; older just keeps 0 here
+        if (SUCCEEDED(best->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&a3)) && a3) {
+            DXGI_QUERY_VIDEO_MEMORY_INFO vm = {};
+            if (SUCCEEDED(a3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm)))
+                g_vramBudget = vm.Budget;
+            a3->Release();
+        }
+        best->Release();
+    }
     f->Release();
-    return best;
+}
+
+// Size the texture budget to this PC. FiveM hands every machine the same ceiling —
+// SetGamePhysicalBudget(3 * 1000000000) times (vid_budgetScale / 12 + 1), and that slider is
+// console-locked in production — so a 24 GB card saturates at the same ~2.8 GB an 8 GB card does.
+// That is why the "textures gone, restart needed" bug shows up on high-end machines too.
+// Hold back a quarter of what Windows offers for render targets, shadow maps and the UI, or
+// 1.5 GB, whichever is more; small cards therefore keep a fixed working set and big cards are not
+// capped by an arbitrary percentage. Returns 0 when there is nothing to gain over what FiveM set.
+// ponytail: probed once at startup, not re-queried per beat. The offered budget does move when
+// the player alt-tabs into something GPU-hungry; if that turns into stutter reports, call
+// probeVram() from budgetBeat and re-target on a change bigger than the 256 MB step.
+static constexpr uint64_t budgetFor(uint64_t cap, uint64_t current)
+{
+    if (!cap) return 0;
+    uint64_t reserve = (cap / 4 > (3ull << 29)) ? cap / 4 : (3ull << 29);
+    if (cap <= reserve) return 0;
+    uint64_t want = (cap - reserve) & ~((256ull << 20) - 1);             // 256 MB steps
+    return (want > current) ? want : 0;
+}
+// FiveM's own ceiling for reference: 3 * 1000000000 = 2.79 GiB at the locked slider.
+static_assert(budgetFor(24ull << 30, 2800000000ull) == 18ull << 30, "24 GB card holds a quarter back");
+static_assert(budgetFor( 8ull << 30, 2800000000ull) ==  6ull << 30, "8 GB card holds a quarter back");
+static_assert(budgetFor( 6ull << 30, 2800000000ull) ==  9ull << 29, "small card holds the 1.5 GB floor back");
+static_assert(budgetFor( 4ull << 30, 2800000000ull) == 0, "no gain over what the game set, leave it alone");
+static_assert(budgetFor(          0, 2800000000ull) == 0, "card unreadable, leave it alone");
+
+static uint64_t autoBudget(uint64_t current)
+{
+    uint64_t cap = g_vramBudget;
+    if (!cap || (g_vramTotal && cap > g_vramTotal)) cap = g_vramTotal;   // Budget can span shared RAM
+    return budgetFor(cap, current);
 }
 
 static void budgetBeatImpl()
@@ -971,6 +1043,58 @@ static void Setup()
     { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
       for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
       for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
+    // ---- texture budget: sized to this PC, not to a number that fits nobody -------------------
+    // Runs before the pack-cost report below so that report can say whether the ceiling is
+    // already up. _budget.txt still wins when it holds a number of GB; 0 in it turns this off.
+    { probeVram();
+      // the per-quality VRAM budget table, via the pattern Cfx resolves it with
+      // (PatchExtendedBudgeting.cpp: "4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14", address at +6)
+      const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
+      uint8_t* q = scanModule(PAT_VRAM, 13);
+      uint64_t* t = q ? (uint64_t*)ripTarget(q + 6) : nullptr;
+      uint64_t curr = 0;
+      if (t && vramTableSane(t, &curr)) g_vramTable = t;
+
+      double want = -1.0;   // -1 = size it automatically, 0 = leave the game's budget alone
+      { char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
+        FILE* bf = nullptr;
+        if (!fopen_s(&bf, bp, "rb") && bf) {
+            char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
+            double gb = atof(buf);
+            if (gb >= 1.0 && gb <= 48.0) want = gb;
+            else { want = 0.0; logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it"); }
+        } }
+
+      if (!g_vramTable)
+          logf("budget: vram table %s — texture budget left alone, everything else still works",
+               q ? "failed the sanity check" : "pattern NOT FOUND");
+      else if (want > 0.0) {
+          g_budget = (uint64_t)(want * 1073741824.0);
+          if (g_vramTotal && g_budget > g_vramTotal) {
+              logf("budget: your card has %.1f GB of VRAM; clamping the requested %.1f GB to that",
+                   g_vramTotal / 1073741824.0, g_budget / 1073741824.0);
+              g_budget = g_vramTotal;
+          }
+          if (g_budget <= curr) {   // lowering it would only make texture loss worse
+              logf("budget: _budget.txt asks for %.1f GB, which is no more than the %.1f GB the game already gives, so it is left alone (put 0 in that file to turn this off)",
+                   g_budget / 1073741824.0, curr / 1073741824.0);
+              g_budget = 0;
+          }
+          else logf("budget: _budget.txt asked for %.1f GB, raising the texture budget from the %.1f GB the game set (table @ %p)",
+                    g_budget / 1073741824.0, curr / 1073741824.0, (void*)t);
+      }
+      else if (want < 0.0) {
+          g_budget = autoBudget(curr);
+          if (g_budget)
+              logf("budget: sized to this PC — %.1f GB, up from the %.1f GB the game gives every machine (card %.1f GB, Windows is offering this process %.1f GB right now). Put a number of GB in _budget.txt to pick your own, or 0 to leave it alone.",
+                   g_budget / 1073741824.0, curr / 1073741824.0,
+                   g_vramTotal / 1073741824.0, g_vramBudget / 1073741824.0);
+          else if (!g_vramTotal && !g_vramBudget)
+              logf("budget: cannot read this card's memory, so the texture budget is left as the game set it (%.1f GB). Put a number of GB in _budget.txt to raise it by hand.", curr / 1073741824.0);
+          else
+              logf("budget: the %.1f GB the game already gives is as much as this card can spare, leaving it alone (card %.1f GB)", curr / 1073741824.0, g_vramTotal / 1073741824.0);
+      }
+    }
     if (g_costVirt + g_costPhys) {
         logf("pack cost when fully loaded: %.1f MB of texture memory + %.1f MB other. Vanilla clothing files stay well under 2 MB each; a heavy pack feeds the \"stuck on low detail / textures gone\" bug on busy servers.",
              g_costPhys / 1048576.0, g_costVirt / 1048576.0);
@@ -978,6 +1102,25 @@ static void Setup()
         for (size_t i = 0; i < g_costBig.size() && i < 20; ++i)
             logf("  HEAVY %6.1f MB  %s — likely 4K or uncompressed; shrink it to fight texture loss", g_costBig[i].first / 1048576.0, g_costBig[i].second.c_str());
         if (g_costBig.size() > 20) logf("  ...and %zu more file(s) over 8 MB", g_costBig.size() - 20);
+        // Past ~1 GB the pack no longer fits the budget, and eviction inside GTA5.exe is
+        // passive-only (cfx #3874), so the pool saturates and the whole world drops to low LOD.
+        // That is the "textures not loading" report from players who never crash. The ceiling is
+        // a fixed table FiveM fills at boot (PatchExtendedBudgeting.cpp: 3 GB x the console-locked
+        // vid_budgetScale) with no VRAM term in it, which is why a 24 GB card saturates at exactly
+        // the same point an 8 GB one does. Say that here: without it, high-end players read the
+        // HEAVY list as a low-end problem and assume their hardware already covers it.
+        if (g_costPhys >= (1024ull << 20)) {
+            char adv[320];
+            if (g_budget && g_costPhys < g_budget)
+                _snprintf_s(adv, _TRUNCATE, "The raised %.1f GB ceiling covers it, so this should hold, but shrinking the HEAVY files above (CodeWalker, Tools, Shrink Textures) is what makes it comfortable.",
+                            g_budget / 1073741824.0);
+            else if (g_budget)
+                _snprintf_s(adv, _TRUNCATE, "Even the raised %.1f GB ceiling does not cover it, so the HEAVY files above have to come down (CodeWalker, Tools, Shrink Textures).",
+                            g_budget / 1073741824.0);
+            else
+                _snprintf_s(adv, _TRUNCATE, "The ceiling could not be raised on this machine, so the HEAVY files above have to come down (CodeWalker, Tools, Shrink Textures).");
+            logf("  a strong graphics card does not fix that on its own: the game hands every PC the same fixed texture budget no matter how much VRAM the card has, which is why this hits high-end machines too. %s", adv);
+        }
     }
 
     // tattoo placement files: *.xml at the root of tex_overrides (edited overlays.xml copies)
@@ -1005,39 +1148,6 @@ static void Setup()
       if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
       logf("live reload: rawStreamer=%s getEntry=%s",
            g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING"); }
-
-    // opt-in texture budget raise: _budget.txt in tex_overrides holds a number of GB
-    { char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
-      FILE* bf = nullptr;
-      if (!fopen_s(&bf, bp, "rb") && bf) {
-          char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
-          double gb = atof(buf);
-          if (gb >= 1.0 && gb <= 48.0) g_budget = (uint64_t)(gb * 1073741824.0);
-          else logf("budget: _budget.txt must hold a number of GB between 1 and 48 — ignored");
-      } }
-    if (g_budget) {
-        uint64_t vram = dedicatedVram();
-        if (vram && g_budget > vram) {
-            logf("budget: your card has %.1f GB of VRAM; clamping the requested %.1f GB to that",
-                 vram / 1073741824.0, g_budget / 1073741824.0);
-            g_budget = vram;
-        }
-        // the per-quality VRAM budget table, via the pattern Cfx resolves it with
-        // (PatchExtendedBudgeting.cpp: "4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14", address at +6)
-        const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
-        uint8_t* q = scanModule(PAT_VRAM, 13);
-        uint64_t* t = q ? (uint64_t*)ripTarget(q + 6) : nullptr;
-        if (t && vramTableSane(t)) {
-            g_vramTable = t;
-            logf("budget: raising the texture budget to %.1f GB (table @ %p, was %.1f GB)",
-                 g_budget / 1073741824.0, (void*)t, t[3] / 1073741824.0);
-        }
-        else {
-            g_budget = 0;
-            logf("budget: vram table %s — budget raise disabled, everything else still works",
-                 q ? "failed the sanity check" : "pattern NOT FOUND");
-        }
-    }
 
     const short PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
     uint8_t* p = scanModule(PAT, sizeof PAT / sizeof *PAT);

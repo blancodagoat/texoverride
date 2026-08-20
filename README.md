@@ -128,12 +128,15 @@ folder while you play and reacts on its own when something in it changes.
 
 - Save an edited `overlays.xml` and the tattoo moves on your ped within a second or two. This
   makes tuning easy: nudge a number, save, look, repeat.
-- Drop in a new `.ytd` or `.ydd` and it is picked up right away.
-- Overwrite a `.ytd` that is already in use and the new picture shows the next time the game
-  reloads that item. Take the clothing or tattoo off and put it back on to force that.
+- Overwrite a `.ytd` or `.ydd` the plugin already uses and the new picture shows the next time
+  the game reloads that item. Take the clothing or tattoo off and put it back on to force that.
+  This is the one you want while you are working on a texture, and it always works.
+- Drop in a file with a name nothing else uses and it is picked up right away.
 
-There is nothing to set up and nothing to turn on. If a change cannot be applied live, the log
-says so and a restart will apply it.
+The one thing that cannot happen live is taking over a name the server or a DLC has already
+loaded. Once the game holds a name it will not hand it over until it restarts, so the log says so
+and asks you to restart. On the next launch the plugin claims the name early, before the server
+mounts, and from then on editing that file applies live like everything else.
 
 There is also a safety net. If the game crashes right after a live change, the plugin remembers
 which files were involved. On the next launch it refuses to load them, and the log tells you.
@@ -174,21 +177,39 @@ character and leave the rest of the game room to breathe.
 If it still happens with a light pack, it is the server, not you. Set Extended Texture Budget to
 the highest value your video card allows (Settings, Graphics) and lower Texture Quality one step.
 
-### Raising the budget past the slider
+### The budget, and why a good graphics card does not save you
 
-The slider does not set a size. It multiplies a fixed 3 GB base, and even at maximum it lands
-around 6 GB of texture budget, the same on every card. A 24 GB card gets the same ceiling as a
-12 GB card, which is why maxing the slider often is not enough. If you have VRAM to spare, put a
-file named `_budget.txt` into `tex_overrides` containing just a number of GB, for example:
+The Extended Texture Budget slider does not set a size. It multiplies a fixed 3 GB base, and even
+at maximum it lands around 6 GB, the same on every card. There is no video memory anywhere in that
+sum. A 24 GB card gets the same ceiling as a 4 GB card, which is why this bug shows up on expensive
+builds too and why maxing the slider often is not enough.
+
+The plugin fixes that for you. On startup it asks Windows how much video memory it is willing to
+give the game right now, holds back a quarter of that (or 1.5 GB, whichever is more) for the parts
+of the game that are not textures, and raises the ceiling to whatever is left. You do not have to
+set anything. The log line looks like this:
+
+```
+budget: sized to this PC - 17.0 GB, up from the 2.8 GB the game gives every machine
+        (card 24.0 GB, Windows is offering this process 23.2 GB right now)
+```
+
+If your card has nothing to spare, the plugin says so and leaves the budget alone rather than
+pushing past what the card holds, which would make the game stutter instead of helping.
+
+To pick the number yourself, put a file named `_budget.txt` into `tex_overrides` containing just a
+number of GB, for example:
 
 ```
 8
 ```
 
-Restart FiveM. The log will show a line like `texture budget: 6.0 -> 8.0 GB`. The plugin refuses
-numbers above what your card physically has, because going past real VRAM makes the game stutter
-instead of helping. This buys headroom before the bug hits; it does not remove the bug, which
-lives inside GTA itself. Delete the file to go back to normal.
+Put a `0` in that file instead to switch the whole thing off and leave the game's budget exactly as
+it was. Either way, restart FiveM after changing it.
+
+A bigger ceiling buys headroom before the bug hits. It does not remove the bug, which lives inside
+GTA itself, and it cannot make a pack fit that is simply too big. Shrinking the files in the
+`HEAVY` list is still the fix that always works.
 
 ## Turning it off
 
@@ -209,7 +230,8 @@ crashed, the log from the crashed session is still there.
 | `pack cost when fully loaded: ...` | What your files cost the game in memory |
 | `HEAVY x MB file` | That file is oversized; shrink it to avoid texture loss |
 | `TOO BIG file — x MB` | Over 32 MB; not loaded because files that big crash the game |
-| `texture budget: a -> b GB` | Your `_budget.txt` raise was applied |
+| `budget: sized to this PC ...` | The texture budget was raised to fit your card |
+| `texture budget: a -> b GB` | The raise was written into the game |
 | `placement: collection ... N preset(s)` | Your edited `.xml` was read |
 | `placement: ... layout solved` | The `.xml` matched the game; changes can be applied |
 | `streaming manager @ ...` | Internal: found what it needs to keep overrides in place |
@@ -304,6 +326,53 @@ Four things from Cfx's own source and docs, strongest first:
 All four settle one question: whether a plugin is allowed to load. None of them say anything about
 what a plugin does in memory once loaded. That is a separate question, covered honestly in
 [Ban risk, stated plainly](#ban-risk-stated-plainly) below.
+
+## Why your antivirus may call it a trojan
+
+It happens, and the honest answer is that the plugin does the things antivirus software watches
+for. Not by accident, and not hidden: it is what a game mod that changes what the game draws has
+to do.
+
+- It writes five bytes into the running game to redirect one function. That is the same technique
+  every trainer, overlay and mod loader uses, and scanners class it as code injection.
+- It allocates a small piece of memory that is both writable and executable, to hold the original
+  copy of that function. Generic detections weigh this heavily on its own.
+- It scans the game's memory for byte patterns to find the functions it needs.
+- It is an unsigned file, loaded into another program, that almost nobody has run yet. Microsoft
+  Defender scores new unsigned files partly on how many people have seen them, so a fresh release
+  starts with a bad score no matter what is in it.
+
+Names like `Wacatac`, `Injector`, `HackTool` or `Trojan:Win32/Wacatac.B!ml` mean a heuristic fired,
+not that something was found. The `!ml` on the end literally means a machine learning guess.
+
+What you can do:
+
+- Check it yourself. Upload the file to [VirusTotal](https://www.virustotal.com). A handful of
+  engines flagging it while the majority do not is what a false positive looks like.
+- Compare the file. Every release is built by GitHub Actions from the source in this repository,
+  and the release notes list the SHA-256 of the file so you can check the one you downloaded is
+  the one that was built. You do not have to take that on trust either. Each release is signed
+  with build provenance, so with [GitHub CLI](https://cli.github.com) installed you can ask for
+  proof that this exact file came out of this repository:
+
+  ```
+  gh attestation verify texoverride.asi --repo blancodagoat/texoverride
+  ```
+
+  If someone hands you a `texoverride.asi` from anywhere else and that command fails, do not run
+  it. That is the check worth doing, because a tampered copy is the one real risk here.
+- Build it yourself. `build.bat` needs only the free Visual Studio Build Tools. Then the file on
+  your disk is one you made.
+- Report it. If Defender flagged it, submitting it at
+  [Microsoft's false positive form](https://www.microsoft.com/en-us/wdsi/filesubmission) usually
+  gets it cleared within a few days, for everyone.
+- Add an exclusion for your FiveM `plugins` folder, if you are comfortable doing that and you
+  trust where you got the file.
+
+What this project will not do is obfuscate, pack, or otherwise dress the file up to slip past
+scanners. That is what actual malware does, it makes detections worse rather than better, and it
+would destroy the one thing that makes a mod like this trustworthy: that you can read every line
+of what it does.
 
 ## Ban risk, stated plainly
 
