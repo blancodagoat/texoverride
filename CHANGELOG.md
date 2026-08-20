@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1 (2026-08-20)
+
+- Fixes the headline feature of 0.7.0, which did not work. The check that reads how much video
+  memory your card has was running too early in startup, at a point where Windows will not answer
+  it, so every log said it could not read the card and the budget was left alone. It now runs a
+  moment later, once the game is properly up, and it says which step failed if it ever cannot read
+  the card at all.
+- Corrected what the log and the readme say the game's own ceiling is. It is about 2.9 GB with the
+  Extended Texture Budget slider untouched and about 7.8 GB with that slider maxed out. Neither
+  number has anything to do with your graphics card, so a 24 GB card and an 8 GB card hit the same
+  wall, which is the whole reason this feature exists.
+- The pack cost report now compares your pack against what the game is actually giving you rather
+  than guessing.
+
 ## 0.7.0 (2026-08-20)
 
 - The texture budget now sizes itself to your PC instead of leaving everyone on the same fixed
