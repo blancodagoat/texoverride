@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.1 (2026-08-20)
+
+- Files with more than 32 MB of texture and mesh data are no longer loaded, and the log says
+  so with a `TOO BIG` line naming each one. Every crash we have investigated so far involved
+  packs with 45 to 112 MB files in them, while 32 MB files are verified to work. Shrink the
+  named files with the CodeWalker Shrink Textures tool to get them back.
+- Fixed a startup failure ("Couldn't load texoverride.asi", game refuses to start) on machines
+  where a graphics mod's dxgi.dll sits in the FiveM folder without providing everything the
+  plugin asked from the real one. The plugin now talks to the system's own dxgi directly.
+- If the plugin hits any other error while starting up, it now turns itself off for that
+  session instead of stopping FiveM from launching.
+- The log from your previous session is now kept as `texoverride.log.old` instead of being
+  erased on every launch. If the game crashes, the log that shows what happened survives the
+  next start.
+
 ## 0.6.0 (2026-08-19)
 
 - You can now raise the game's texture budget past what the settings slider allows. Put a file
