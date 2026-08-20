@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.2 (2026-08-20)
+
+- The check that reads your graphics card can no longer take the game down with it. If it ever
+  fails on your machine the plugin now says so in the log, leaves the texture budget exactly as the
+  game set it, and carries on doing everything else.
+- Background, since it explains 0.7.1 as well. In 0.7.0 that check ran far too early in startup,
+  while Windows was still loading plugins. On one player's PC it crashed outright, and on another
+  it appears to have upset a separate upscaling plugin that also works with graphics memory, which
+  took the whole game down and looked like that other plugin's fault. Moving the check later, in
+  0.7.1, fixed both. This release makes sure that even in the worst case it can only ever cost you
+  the budget feature.
+
 ## 0.7.1 (2026-08-20)
 
 - Fixes the headline feature of 0.7.0, which did not work. The check that reads how much video
