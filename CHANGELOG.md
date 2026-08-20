@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.2 (2026-08-20)
+
+- The crash cause is confirmed: removing the files over 32 MB stopped the crashes in testing,
+  so the size gate from 0.6.1 stays and got tougher. It now also covers files that are
+  overwritten with a too-big version while the game runs, falls back to the file's size on disk
+  when the header cannot be read, and can no longer be fooled by a broken header claiming a
+  tiny size.
+- A handful of smaller fixes from a code review: the previous-session log is still cleared even
+  when something holds it open, the crash journal from a previous session can no longer be
+  deleted before it has been read, and the VRAM check now always talks to Windows' own graphics
+  library by full path.
+
 ## 0.6.1 (2026-08-20)
 
 - Files with more than 32 MB of texture and mesh data are no longer loaded, and the log says
