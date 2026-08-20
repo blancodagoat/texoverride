@@ -31,7 +31,9 @@
 #include <winhttp.h>
 #include <shellapi.h>
 #include <dxgi.h>
-#pragma comment(lib, "dxgi.lib")
+// no dxgi import lib: a static import resolves against the APPLICATION directory first, and a
+// ReShade/ENB dxgi.dll in the FiveM folder then breaks the load of this whole plugin with
+// "Couldn't load texoverride.asi". dedicatedVram() loads the real one from System32 instead.
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 #include <string>
@@ -120,7 +122,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.6.0"
+#define TEXOVERRIDE_VERSION "0.6.1"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -189,13 +191,23 @@ static int scanDir(const std::string& base, const std::string& rel)
                     continue;
                 }
                 if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
+                std::string full = fwd(base + childRel);
+                uint64_t cv = 0, cp = 0;
+                bool costKnown = rscCost(full.c_str(), &cv, &cp);
+                // every crash-correlated pack contained files past ~32 MB of graphics data
+                // (45-112 MB mesh monsters), while 32 MB files are verified to stream fine.
+                // Refusing the giants keeps the game alive; the log says what was left out.
+                if (costKnown && (cp > (32u << 20))) {
+                    logf("TOO BIG  %s — %.1f MB of texture/mesh data; files this big match our crash reports, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
+                         slotStr.c_str(), cp / 1048576.0);
+                    continue;
+                }
                 const char* slot = _strdup(slotStr.c_str());
-                const char* file = _strdup(fwd(base + childRel).c_str());      // our absolute path
+                const char* file = _strdup(full.c_str());                      // our absolute path
                 g_ovs.push_back({ slot, file });
                 g_bySlot[slot] = file;
                 ++n;
-                uint64_t cv = 0, cp = 0;
-                if (rscCost(file, &cv, &cp)) {
+                if (costKnown) {
                     g_costVirt += cv; g_costPhys += cp;
                     if (cv + cp >= (8u << 20)) g_costBig.push_back({ cv + cp, slotStr });
                 }
@@ -675,6 +687,12 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
 
         if (!known) {
             if (!g_origPeek) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
+            { uint64_t cv = 0, cp = 0;   // same crash gate as the startup scan
+              if (rscCost(fwd(full).c_str(), &cv, &cp) && (cp > (32u << 20))) {
+                  logf("TOO BIG  %s — %.1f MB of texture/mesh data; files this big match our crash reports, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
+                       key.c_str(), cp / 1048576.0);
+                  continue;
+              } }
             batch.push_back({ 0, { _strdup(key.c_str()), _strdup(fwd(full).c_str()) }, 0 });
         }
         else if (handle && isChanged) {
@@ -851,8 +869,16 @@ static bool vramTableSane(uint64_t* t)      // refuse to write unless it looks l
 
 static uint64_t dedicatedVram()             // biggest hardware adapter; 0 when unknowable
 {
+    // dxgi loaded from System32 by explicit choice: a static import binds to a ReShade/ENB
+    // dxgi.dll sitting in the FiveM folder and can fail the load of this whole plugin
+    typedef HRESULT (WINAPI* CreateFactory_t)(REFIID, void**);
+    HMODULE dx = LoadLibraryExA("dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!dx) return 0;
+    auto createFactory = (CreateFactory_t)GetProcAddress(dx, "CreateDXGIFactory1");
+    if (!createFactory) return 0;
+
     uint64_t best = 0; IDXGIFactory1* f = nullptr;
-    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return 0;
+    if (FAILED(createFactory(__uuidof(IDXGIFactory1), (void**)&f)) || !f) return 0;
     IDXGIAdapter1* a = nullptr;
     for (UINT i = 0; f->EnumAdapters1(i, &a) == S_OK; ++i) {
         DXGI_ADAPTER_DESC1 d;
@@ -902,7 +928,11 @@ static void Setup()
 
     InitializeCriticalSection(&g_cs);   // must exist before the hook can fire
 
-    DeleteFileA(g_logPath);   // fresh log every launch, so a bug report is small and current
+    // fresh log every launch, but keep one previous generation: after a crash the next launch
+    // used to destroy the exact log that showed what the crashed session was doing
+    { char oldLog[MAX_PATH + 8];
+      _snprintf_s(oldLog, _TRUNCATE, "%s.old", g_logPath);
+      MoveFileExA(g_logPath, oldLog, MOVEFILE_REPLACE_EXISTING); }
     { time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
       char d[32]; strftime(d, sizeof d, "%Y-%m-%d", &tm);
       logf("================ texoverride " TEXOVERRIDE_VERSION " loaded (%s) ================", d); }
@@ -1098,13 +1128,28 @@ static DWORD WINAPI BeatLoop(LPVOID)
     }
 }
 
+// Setup runs inside LoadLibrary: if it faults, FiveM's asi loader shows "Couldn't load
+// texoverride.asi" as a FATAL error and the game refuses to start until the file is deleted.
+// A broken plugin must degrade to a do-nothing plugin, never brick the launch, so the fault is
+// swallowed here and the beat/update threads are only started on success.
+static bool SetupSafe()
+{
+    __try { Setup(); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        logf("FAULT during startup (code %08X) — plugin disabled for this session", GetExceptionCode());
+        g_off = true;
+        return false;
+    }
+}
+
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = h; DisableThreadLibraryCalls(h);
-        Setup();   // synchronous: must finish before the game's entry point runs (see Setup)
-        CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
-        CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+        if (SetupSafe()) {   // synchronous: must finish before the game's entry point runs (see Setup)
+            CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
+            CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+        }
     }
     else if (reason == DLL_PROCESS_DETACH) {
         // orderly exit = no crash: the live-change journal must not quarantine anything.

@@ -198,7 +198,8 @@ The plugin stays installed but does nothing, including the update check.
 ## Reading the log
 
 Everything the plugin does is written to `plugins/texoverride.log`. The file starts fresh on every
-launch.
+launch, and the previous session's log is kept next to it as `texoverride.log.old`, so if the game
+crashed, the log from the crashed session is still there.
 
 | Line | What it means |
 |---|---|
@@ -207,6 +208,7 @@ launch.
 | indented `collection N file(s)` lines | How your files were grouped |
 | `pack cost when fully loaded: ...` | What your files cost the game in memory |
 | `HEAVY x MB file` | That file is oversized; shrink it to avoid texture loss |
+| `TOO BIG x MB file` | Over 32 MB; not loaded because files that big crash the game |
 | `texture budget: a -> b GB` | Your `_budget.txt` raise was applied |
 | `placement: collection ... N preset(s)` | Your edited `.xml` was read |
 | `placement: ... layout solved` | The `.xml` matched the game; changes can be applied |
