@@ -44,8 +44,9 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
 ## How the hook works
 
 Hooks ONE game function, `registerRawStreamingFile`, in the GAME module (`GTA5.exe`) only, never
-FiveM's DLLs (Cfx `legitimacy` anti-tamper kills the process if you touch Cfx components; a
-game-module hook is the same surface trainers use). Byte pattern from Cfx's open source
+FiveM's DLLs (a game-module hook is the same surface trainers use). The rule stands but the
+REASON was misattributed until 2026-08-21: `legitimacy` is Discord/Discourse/Steam/ROS auth, not
+anti-tamper. The real gate is the component manifest mismatch fatal in `DllGameComponent.Win32.cpp`. Byte pattern from Cfx's open source
 (`gta-streaming-five/src/Streaming.cpp`). Flags passed to it are constants `(true, false)`.
 
 Base freemode clothing lives in `x64v.rpf` and never passes through that function, so the plugin
@@ -253,8 +254,76 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
   (deny-by-exception blacklist: openiv.asi, scripthookvdotnet.asi, fspeedometerv.asi, Gears.asi,
   .NET assemblies).
 - Mod packages: `components/citizen-mod-loader-five/src/` (ModPackage.cpp, ModVFSDevice.cpp) —
-  OpenIV assembly.xml format, pure level 0 only, can register data files and pseudo-DLCs.
+  OpenIV assembly.xml format, pure level 0 only. **It CANNOT register data files or pseudo-DLCs**
+  (that claim was wrong here until 2026-08-21). Its entire parser vocabulary, by string dump, is
+  `package / Five / content / archive / path / add / source`: insert files into archives that
+  ALREADY exist, nothing else. No `dlclist`, no `dlcpacks`, no `setup2.xml`, and
+  `createIfNotExist` is parsed by nobody. DLC mounting lives in `citizen-level-loader-five`, a
+  different component, for maps. Consequence: any dlcpack has to be converted by merging its data
+  into the vanilla files it extends (done once for a vehicle-audio pack: CodeWalker `RelFile`
+  round-trips `.rel` byte-identically, so `RelDatas` concat + dedupe + `Save()` works, and pack
+  entries must OVERRIDE vanilla on hash collision or the replaced vehicles keep stock audio).
 - PedDecorationManager pattern + struct: `gta-streaming-five/src/PatchTattooSort.cpp`.
 - Tattoo shop data structures: `TheeBabyGoat/GameSource` `source/Scene/ExtraMetadataMgr.{h,cpp}`
   and `ExtraMetadataDefs.psc` (partial/leaked source — absence there is not proof of absence in the
   real binary).
+
+## Ped overlays on REMOTE peds — researched 2026-08-21, ASI is NOT the fix
+
+A player reported overlays/tattoos rendering on their own ped but missing or flickering for a few
+seconds at certain camera angles on OTHER players, server-wide, while other FiveM servers are fine.
+16-agent research pass with adversarial verification. Do not re-derive any of this.
+
+**The actual fix is a server convar.** `setr game_enableStableOverlaySort true` (ConVar_Replicated,
+default false, undocumented on docs.fivem.net). The game sorts decoration collections with a
+comparator that SUBTRACTS two unsigned hashes — not a valid total order — so the result depends on
+mount order and shifts on every resource restart. Cfx replaces the comparator at
+`location + 0x1E` behind that convar (`PatchTattooSort.cpp`). Being undocumented and replicated is
+exactly why one server breaks and others do not.
+
+**Cheapest discriminator, zero code:** while the bug is visible, change Texture Quality to force a
+D3D device reset (`CPedDamageSetBase::DeviceLost/DeviceReset` rebuilds the decoration render-target
+set). Tattoos return => data IS on this client, residency problem. Nothing changes => the data
+never arrived and no client-side code can help.
+
+**Why the obvious ASI fix does not work:** fivem#2010 already tried force-requesting the tattoo
+`.ytd` on the observing client. The ytd loads and the tattoo still does not appear. Also
+`GET_PED_DECORATIONS` is documented by Cfx as returning undefined data for a remote player ped, so
+there is NO client-side source of truth to re-apply from. Decorations reach remote peds as packed
+32-bit words in `CPlayerAppearanceDataNode`, and the word count for b3751/b3788 is UNVERIFIED
+(56 is `#if 0` dead code, 60 is one Stand-OSS snapshot; never write a byte on that).
+
+**Verified facts worth keeping (Rockstar `streamingdefs.h`, cross-checked against Cfx's live
+`ReleaseObject(idx, 0xF1)`):**
+- `StreamingDataEntry` = `{ u32 handle; u32 status:2, dependentCount:14, flags:16; }`.
+  So Cfx's `flags &= ~0xFFFC` clears the DEPENDENT COUNT, not the STRFLAG field. STRFLAGs are the
+  top 16 bits. Status: 0 NOTLOADED, 1 LOADED, 2 LOADREQUESTED, 3 LOADING.
+- STRFLAG bits: DONTDELETE 1<<0, FORCE_LOAD 1<<1, PRIORITY_LOAD 1<<2, LOADSCENE 1<<3, MISSION 1<<4,
+  CUTSCENE 1<<5, INTERIOR 1<<6, ZONEDASSET 1<<7; `STR_DONTDELETE_MASK` = 0xF1.
+- **NEVER raw-OR a STRFLAG bit into a live entry.** `SetRequiredFlag`/`ClearRequiredFlag` also move
+  the entry between the loaded and persistent lists and maintain `m_numPriorityRequests`; a hand
+  write desyncs that and produces a DELAYED intrusive-list crash. Rockstar asserts against it.
+  The sanctioned pin is `RequestObject(globalId, 7)` + `ClearRequiredFlag(id, 1)` on teardown,
+  which is what GTA V's own MeshBlendManager and Cfx both use. `FORCE_LOAD` self-clears on load.
+- Patterns (game module): RequestObject = `get_call(get_pattern("41 B8 14 00 00 00 03 D3 E8", 8))`,
+  LoadObjectsNow = same pattern at 0xF, ClearRequiredFlag = `"8B CA 4D 8B 11 45 0F B7 5C CA 06 45"`
+  at -0xB. Must run on the update thread (our PeekMessageW pump).
+- Preset struct IS published (alexguirre/rage-parser-dumps, struct `0xB8C1BF6F`, size 160,
+  consistent b2189..b3442): collection `presets` atArray +0x00 (ptr, u16 count +0x08, u16 cap
+  +0x0A), `nameHash` +0x10, `bRequiredForSync` +0x9C. Preset stride 0x40: uvPos +0x00, scale +0x08,
+  rotation +0x10, nameHash +0x14, **txdHash +0x18**, txtHash +0x1C, zone +0x20, type +0x24.
+  Earlier searches missed it because those dumps use CASE-SENSITIVE joaat of member names.
+  No dump exists for b3751/b3788, but our own fingerprint solver re-derives these every session.
+
+**Dead, do not retry:** raising the VRAM budget or TxdStore pool (ruled out upstream AND by the
+user's own 7.8 -> 10 GB test); pre-requesting the observer's ytds; re-applying decorations locally;
+widening the packed bitfield (wire format, both peers must agree); `gameconfig.xml` (no decoration,
+damage-set or blend pool exists in b3751's 193 pools); ScriptHookV (FiveM ships its own, and every
+`nativeCall` is refused unless the server sets `sv_scriptHookAllowed`, default false);
+PackfileLimitAdjuster / HeapAdjuster / PedProp Limit Adjuster (none touch decorations); static
+analysis of the on-disk GTA5.exe (protected, zero rip-relative xrefs; only a runtime dump works).
+Client-side stable sort is trivial but MUST NOT ship: the convar is replicated because every client
+must agree, so fixing one client swaps missing tattoos for wrong tattoos on wrong body zones.
+UNVERIFIED numbers nobody should re-derive: NUM_DECORATION_BITFIELDS, the sorted index array
+stride, kMaxCompressedTextures / kMax*BloodRenderTargets / kInvalidPedDamageSet, FindSlot absolute
+vtable indices (the +6 shift on builds >= 2802 is verified, the absolute index is not).
