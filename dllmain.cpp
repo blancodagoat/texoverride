@@ -62,6 +62,7 @@ static std::vector<Ov> g_ovs;
 static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
 static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
+static bool g_crashSaverRan = false;                  // gates journal deletion on orderly exit
 static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH];
 
 // ---- streaming-cost audit ------------------------------------------------------------------
@@ -71,9 +72,11 @@ static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH];
 // loss" on heavy servers is that budget running dry, so the scan totals what the pack costs
 // and names the heavy files. Threshold: 8 MB catches any 4K texture and 2K uncompressed;
 // vanilla clothing txds sit well under 2 MB.
-static uint32_t rscSizeFromFlags(uint32_t f)
+static uint64_t rscSizeFromFlags(uint32_t f)
 {
-    uint32_t pages = ((f >> 27) & 0x1)
+    // 64-bit throughout: with the max page shift the 32-bit product wraps at 4 GB, and a
+    // corrupt header could then report a tiny size and slip under the TOO BIG gate
+    uint64_t pages = ((f >> 27) & 0x1)
                    + (((f >> 26) & 0x1)  << 1)
                    + (((f >> 25) & 0x1)  << 2)
                    + (((f >> 24) & 0x1)  << 3)
@@ -82,7 +85,7 @@ static uint32_t rscSizeFromFlags(uint32_t f)
                    + (((f >> 7)  & 0xF)  << 6)
                    + (((f >> 5)  & 0x3)  << 7)
                    + (((f >> 4)  & 0x1)  << 8);
-    return (0x200u << (f & 0xF)) * pages;
+    return (0x200ull << (f & 0xF)) * pages;
 }
 static bool rscCost(const char* path, uint64_t* virt, uint64_t* phys)
 {
@@ -98,6 +101,31 @@ static bool rscCost(const char* path, uint64_t* virt, uint64_t* phys)
 }
 static uint64_t g_costVirt, g_costPhys;
 static std::vector<std::pair<uint64_t, std::string>> g_costBig;   // files >= 8 MB in memory
+
+static void logf(const char* fmt, ...);
+
+// One crash gate for every load path (startup scan, live new file, live overwrite): refuse
+// anything whose graphics segment exceeds 32 MB. CONFIRMED cause of the summer-maine-steak
+// crash: removing exactly the five >32 MB files stopped it, 32 MB files are verified fine.
+// Virtual (CPU) data is deliberately not gated; the crash evidence is graphics-side only.
+// When the header cannot be read (locked by antivirus, mid-copy) the on-disk size stands in,
+// so the gate never fails open.
+static bool tooBigToStream(const char* path, const char* key, bool quiet)
+{
+    uint64_t cv = 0, cp = 0;
+    if (!rscCost(path, &cv, &cp)) {
+        WIN32_FILE_ATTRIBUTE_DATA fad;
+        if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) {
+            if (!quiet) logf("UNREADABLE %s — cannot open it, so it is not loaded this launch", key);
+            return true;
+        }
+        cp = (((uint64_t)fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;   // on-disk stand-in
+    }
+    if (cp <= (32ull << 20)) return false;
+    if (!quiet) logf("TOO BIG  %s — %.1f MB of texture/mesh data; files this big are the confirmed cause of game crashes, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
+                     key, cp / 1048576.0);
+    return true;
+}
 
 // rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
 // loader actually opens; layout from Cfx's gta-streaming-five/include/Streaming.h.
@@ -122,7 +150,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.6.1"
+#define TEXOVERRIDE_VERSION "0.6.2"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -192,22 +220,14 @@ static int scanDir(const std::string& base, const std::string& rel)
                 }
                 if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
                 std::string full = fwd(base + childRel);
-                uint64_t cv = 0, cp = 0;
-                bool costKnown = rscCost(full.c_str(), &cv, &cp);
-                // every crash-correlated pack contained files past ~32 MB of graphics data
-                // (45-112 MB mesh monsters), while 32 MB files are verified to stream fine.
-                // Refusing the giants keeps the game alive; the log says what was left out.
-                if (costKnown && (cp > (32u << 20))) {
-                    logf("TOO BIG  %s — %.1f MB of texture/mesh data; files this big match our crash reports, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
-                         slotStr.c_str(), cp / 1048576.0);
-                    continue;
-                }
+                if (tooBigToStream(full.c_str(), slotStr.c_str(), false)) continue;
                 const char* slot = _strdup(slotStr.c_str());
                 const char* file = _strdup(full.c_str());                      // our absolute path
                 g_ovs.push_back({ slot, file });
                 g_bySlot[slot] = file;
                 ++n;
-                if (costKnown) {
+                uint64_t cv = 0, cp = 0;
+                if (rscCost(file, &cv, &cp)) {
                     g_costVirt += cv; g_costPhys += cp;
                     if (cv + cp >= (8u << 20)) g_costBig.push_back({ cv + cp, slotStr });
                 }
@@ -687,12 +707,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
 
         if (!known) {
             if (!g_origPeek) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
-            { uint64_t cv = 0, cp = 0;   // same crash gate as the startup scan
-              if (rscCost(fwd(full).c_str(), &cv, &cp) && (cp > (32u << 20))) {
-                  logf("TOO BIG  %s — %.1f MB of texture/mesh data; files this big match our crash reports, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
-                       key.c_str(), cp / 1048576.0);
-                  continue;
-              } }
+            if (tooBigToStream(fwd(full).c_str(), key.c_str(), quiet)) continue;   // crash gate; quiet skips the baseline re-log
             batch.push_back({ 0, { _strdup(key.c_str()), _strdup(fwd(full).c_str()) }, 0 });
         }
         else if (handle && isChanged) {
@@ -700,6 +715,10 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
                 logf("live reload: %s changed, restart to apply (handle %08x not raw)", key.c_str(), handle);
             else if (!g_origPeek)
                 logf("live reload: %s changed, restart to apply", key.c_str());
+            else if (tooBigToStream(fwd(full).c_str(), key.c_str(), false))
+                // the registered slot still points at this path with the OLD size cached, so the
+                // game may read a truncated slice of the new content; make that loud
+                logf("live reload: %s grew past the safe size and was NOT re-read; restore the smaller file or restart", key.c_str());
             else
                 batch.push_back({ 1, { _strdup(key.c_str()), nullptr }, handle });
         }
@@ -869,10 +888,15 @@ static bool vramTableSane(uint64_t* t)      // refuse to write unless it looks l
 
 static uint64_t dedicatedVram()             // biggest hardware adapter; 0 when unknowable
 {
-    // dxgi loaded from System32 by explicit choice: a static import binds to a ReShade/ENB
-    // dxgi.dll sitting in the FiveM folder and can fail the load of this whole plugin
+    // dxgi loaded by FULL System32 path: a static import (or a bare-name load) binds to any
+    // already-loaded ReShade/ENB proxy dxgi.dll, and a proxy missing CreateDXGIFactory1 used
+    // to fail the load of this whole plugin. The full path always gets Windows' own copy.
     typedef HRESULT (WINAPI* CreateFactory_t)(REFIID, void**);
-    HMODULE dx = LoadLibraryExA("dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    char dxPath[MAX_PATH + 16];
+    UINT sl = GetSystemDirectoryA(dxPath, MAX_PATH);
+    if (sl == 0 || sl >= MAX_PATH) return 0;
+    strcat_s(dxPath, "\\dxgi.dll");
+    HMODULE dx = LoadLibraryA(dxPath);
     if (!dx) return 0;
     auto createFactory = (CreateFactory_t)GetProcAddress(dx, "CreateDXGIFactory1");
     if (!createFactory) return 0;
@@ -932,11 +956,14 @@ static void Setup()
     // used to destroy the exact log that showed what the crashed session was doing
     { char oldLog[MAX_PATH + 8];
       _snprintf_s(oldLog, _TRUNCATE, "%s.old", g_logPath);
-      MoveFileExA(g_logPath, oldLog, MOVEFILE_REPLACE_EXISTING); }
+      if (!MoveFileExA(g_logPath, oldLog, MOVEFILE_REPLACE_EXISTING))
+          DeleteFileA(g_logPath);   // rotation blocked (file held open): keep "fresh log" true
+    }
     { time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
       char d[32]; strftime(d, sizeof d, "%Y-%m-%d", &tm);
       logf("================ texoverride " TEXOVERRIDE_VERSION " loaded (%s) ================", d); }
     crashSaverStartup();   // quarantine anything a crash left in the journal, before the scan
+    g_crashSaverRan = true;
     int n = scanDir(std::string(g_overrideDir), "");
     logf("loaded %d override(s); mode %s", n, g_off ? "OFF" : "ON");
     { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
@@ -1134,8 +1161,10 @@ static DWORD WINAPI BeatLoop(LPVOID)
 // swallowed here and the beat/update threads are only started on success.
 static bool SetupSafe()
 {
+    // stack overflow is NOT swallowed: continuing on this thread with an unarmed guard page
+    // would convert a clean load failure into an unattributable crash later in game code
     __try { Setup(); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
+    __except ((GetExceptionCode() == EXCEPTION_STACK_OVERFLOW) ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER) {
         logf("FAULT during startup (code %08X) — plugin disabled for this session", GetExceptionCode());
         g_off = true;
         return false;
@@ -1154,7 +1183,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
     else if (reason == DLL_PROCESS_DETACH) {
         // orderly exit = no crash: the live-change journal must not quarantine anything.
         // A real crash never reaches this line, which is the whole point.
-        if (g_inflightPath[0]) DeleteFileA(g_inflightPath);
+        // only after crashSaverStartup has processed any leftover journal: if Setup faulted
+        // before that point, deleting here would erase the previous crash's evidence
+        if (g_crashSaverRan && g_inflightPath[0]) DeleteFileA(g_inflightPath);
     }
     return TRUE;
 }
