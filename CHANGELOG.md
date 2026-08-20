@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3 (2026-08-20)
+
+- The crash-size check now covers mesh data as well as texture data. A player's crash dump
+  showed the same crash coming from files whose bulk is 3D mesh rather than textures, which the
+  0.6.1 check did not count. Anything with more than 32 MB on either side is now refused with a
+  TOO BIG line naming it.
+
 ## 0.6.2 (2026-08-20)
 
 - The crash cause is confirmed: removing the files over 32 MB stopped the crashes in testing,

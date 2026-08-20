@@ -105,9 +105,10 @@ static std::vector<std::pair<uint64_t, std::string>> g_costBig;   // files >= 8 
 static void logf(const char* fmt, ...);
 
 // One crash gate for every load path (startup scan, live new file, live overwrite): refuse
-// anything whose graphics segment exceeds 32 MB. CONFIRMED cause of the summer-maine-steak
-// crash: removing exactly the five >32 MB files stopped it, 32 MB files are verified fine.
-// Virtual (CPU) data is deliberately not gated; the crash evidence is graphics-side only.
+// anything with more than 32 MB in EITHER resource segment. CONFIRMED cause of the
+// summer-maine-steak crash twice over: five files with 64 MB graphics segments (removal test),
+// then a player crashing on mesh files whose 77+ MB sat in the virtual segment while graphics
+// stayed under the line — same crash address both times. 32 MB per segment is verified fine.
 // When the header cannot be read (locked by antivirus, mid-copy) the on-disk size stands in,
 // so the gate never fails open.
 static bool tooBigToStream(const char* path, const char* key, bool quiet)
@@ -121,9 +122,10 @@ static bool tooBigToStream(const char* path, const char* key, bool quiet)
         }
         cp = (((uint64_t)fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;   // on-disk stand-in
     }
-    if (cp <= (32ull << 20)) return false;
-    if (!quiet) logf("TOO BIG  %s — %.1f MB of texture/mesh data; files this big are the confirmed cause of game crashes, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
-                     key, cp / 1048576.0);
+    uint64_t worst = (cv > cp) ? cv : cp;
+    if (worst <= (32ull << 20)) return false;
+    if (!quiet) logf("TOO BIG  %s — %.1f MB of %s data; files this big are the confirmed cause of game crashes, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
+                     key, worst / 1048576.0, (cv > cp) ? "mesh" : "texture");
     return true;
 }
 
@@ -150,7 +152,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.6.2"
+#define TEXOVERRIDE_VERSION "0.6.3"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
