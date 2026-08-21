@@ -60,6 +60,7 @@ struct Ov {
 };
 static std::vector<Ov> g_ovs;
 static HANDLE g_scanDone = nullptr;   // set once g_ovs is final; the hook waits on it
+static volatile LONG g_waitLogged = 0;
 static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
 static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
@@ -907,8 +908,23 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
         // Bounded, and skipped entirely when the plugin is off: if the scan thread never got
         // started (a fault in Setup disables the plugin but leaves this hook live) an infinite
         // wait here would hang the game on a plugin that is already doing nothing.
-        if (!g_off && g_scanDone && WaitForSingleObject(g_scanDone, 300000) == WAIT_TIMEOUT)
-            logf("the file scan is still running after 5 minutes — registering what it has so far");
+        //
+        // How long this waits IS the plugin's cost to startup, and it is the only number that
+        // says whether moving the scan off DllMain bought anything: the scan's own duration does
+        // not, because most of it overlaps with the game starting. Logged once.
+        if (!g_off && g_scanDone) {
+            ULONGLONG w0 = GetTickCount64();
+            DWORD r = WaitForSingleObject(g_scanDone, 300000);
+            ULONGLONG ms = GetTickCount64() - w0;
+            if (!InterlockedExchange(&g_waitLogged, 1)) {
+                if (r == WAIT_TIMEOUT)
+                    logf("the file scan is still running after 5 minutes — registering what it has so far");
+                else if (ms >= 100)
+                    logf("the game was ready for these files %.1fs before the scan was, so it waited that long. Everything before that point ran alongside the game's own startup and cost you nothing.", ms / 1000.0);
+                else
+                    logf("the scan finished before the game needed it: no waiting at all, the whole scan ran alongside startup");
+            }
+        }
         EnterCriticalSection(&g_cs);
 
         // capture the flag values a real streamed call uses
