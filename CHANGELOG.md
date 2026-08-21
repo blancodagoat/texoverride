@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.3 (2026-08-21)
+
+- Big packs no longer hold the game on the loading screen. Before it can start, the plugin has to
+  look at every file you gave it, and it was doing that in the one place where the game can only
+  sit and wait for it. On a pack with thousands of files that ran for minutes with nothing on
+  screen. That work now happens while the game gets on with its own startup, several files at a
+  time instead of one, and each file is read once instead of twice.
+- The log says how many files it found, how long the check took, and names the step while it is
+  running, so a long pause during startup no longer looks like the plugin died with no
+  explanation.
+- Nothing about what gets loaded has changed. The size limit that keeps oversized files out still
+  applies to exactly the same files, in the same order, with the same log lines.
+
 ## 0.7.2 (2026-08-20)
 
 - The check that reads your graphics card can no longer take the game down with it. If it ever

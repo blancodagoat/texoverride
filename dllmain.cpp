@@ -59,6 +59,7 @@ struct Ov {
     uint32_t handle = 0;                  // the handle value that points at OUR file
 };
 static std::vector<Ov> g_ovs;
+static HANDLE g_scanDone = nullptr;   // set once g_ovs is final; the hook waits on it
 static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
 static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
@@ -112,22 +113,34 @@ static void logf(const char* fmt, ...);
 // stayed under the line — same crash address both times. 32 MB per segment is verified fine.
 // When the header cannot be read (locked by antivirus, mid-copy) the on-disk size stands in,
 // so the gate never fails open.
-static bool tooBigToStream(const char* path, const char* key, bool quiet)
+// Reading the header and judging it are separate so the startup scan can do the reads on
+// several threads and then judge them in file order.
+struct Cost { uint64_t cv, cp; bool readable, rsc; };
+static Cost readCost(const char* path)
 {
-    uint64_t cv = 0, cp = 0;
-    if (!rscCost(path, &cv, &cp)) {
-        WIN32_FILE_ATTRIBUTE_DATA fad;
-        if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) {
-            if (!quiet) logf("UNREADABLE %s — cannot open it, so it is not loaded this launch", key);
-            return true;
-        }
-        cp = (((uint64_t)fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;   // on-disk stand-in
+    Cost c = { 0, 0, true, true };
+    if (rscCost(path, &c.cv, &c.cp)) return c;
+    c.rsc = false;
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) { c.readable = false; return c; }
+    c.cp = (((uint64_t)fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;   // on-disk stand-in
+    return c;
+}
+static bool tooBigJudge(const char* key, const Cost& c, bool quiet)
+{
+    if (!c.readable) {
+        if (!quiet) logf("UNREADABLE %s — cannot open it, so it is not loaded this launch", key);
+        return true;
     }
-    uint64_t worst = (cv > cp) ? cv : cp;
+    uint64_t worst = (c.cv > c.cp) ? c.cv : c.cp;
     if (worst <= (32ull << 20)) return false;
     if (!quiet) logf("TOO BIG  %s — %.1f MB of %s data; files this big are the confirmed cause of game crashes, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
-                     key, worst / 1048576.0, (cv > cp) ? "mesh" : "texture");
+                     key, worst / 1048576.0, (c.cv > c.cp) ? "mesh" : "texture");
     return true;
+}
+static bool tooBigToStream(const char* path, const char* key, bool quiet)
+{
+    return tooBigJudge(key, readCost(path), quiet);
 }
 
 // rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
@@ -153,7 +166,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.7.2"
+#define TEXOVERRIDE_VERSION "0.7.3"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -194,51 +207,105 @@ static bool isAllowedKey(const std::string& key)
     return isFreemodePed(key.substr(0, s));
 }
 
-static int scanDir(const std::string& base, const std::string& rel)
+// The walk itself opens nothing: it only decides which names are ours.
+struct Cand { std::string slot, full; Cost c; };
+static void walkDir(const std::string& base, const std::string& rel, std::vector<Cand>& out)
 {
     std::string pattern = base + rel + "\\*";
     WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return 0;
-    int n = 0;
+    if (h == INVALID_HANDLE_VALUE) return;
     do {
         std::string name = fd.cFileName;
         if (name == "." || name == "..") continue;
         std::string childRel = rel.empty() ? name : rel + "\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) n += scanDir(base, childRel);
-        else {
-            std::string ln = lower(name);
-            // .meta (shop_tattoo.meta etc.) is shop data, not looks — not applied yet, but the
-            // pack-folder layout (tex_overrides/mplowrider/shop_tattoo.meta) is the reserved
-            // convention for it, so acknowledge the file instead of silently skipping it
-            if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
-                logf("IGNORED %s — .meta files hold shop data (prices/menus), not looks; see README", fwd(childRel).c_str());
-                continue;
-            }
-            if (ln.size() > 4 && (ln.compare(ln.size()-4,4,".ytd")==0 || ln.compare(ln.size()-4,4,".ydd")==0)) {
-                std::string slotStr = lower(fwd(childRel));                    // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
-                // SAFETY GATE: folders must be freemode-ped collections; root files must be .ytd.
-                if (!isAllowedKey(slotStr)) {
-                    logf("SKIP (folders must be freemode-ped collections, root files must be .ytd): %s", slotStr.c_str());
-                    continue;
-                }
-                if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
-                std::string full = fwd(base + childRel);
-                if (tooBigToStream(full.c_str(), slotStr.c_str(), false)) continue;
-                const char* slot = _strdup(slotStr.c_str());
-                const char* file = _strdup(full.c_str());                      // our absolute path
-                g_ovs.push_back({ slot, file });
-                g_bySlot[slot] = file;
-                ++n;
-                uint64_t cv = 0, cp = 0;
-                if (rscCost(file, &cv, &cp)) {
-                    g_costVirt += cv; g_costPhys += cp;
-                    if (cv + cp >= (8u << 20)) g_costBig.push_back({ cv + cp, slotStr });
-                }
-            }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { walkDir(base, childRel, out); continue; }
+        std::string ln = lower(name);
+        // .meta (shop_tattoo.meta etc.) is shop data, not looks — not applied yet, but the
+        // pack-folder layout (tex_overrides/mplowrider/shop_tattoo.meta) is the reserved
+        // convention for it, so acknowledge the file instead of silently skipping it
+        if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
+            logf("IGNORED %s — .meta files hold shop data (prices/menus), not looks; see README", fwd(childRel).c_str());
+            continue;
         }
+        if (ln.size() <= 4 || (ln.compare(ln.size()-4,4,".ytd") != 0 && ln.compare(ln.size()-4,4,".ydd") != 0)) continue;
+        std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
+        // SAFETY GATE: folders must be freemode-ped collections; root files must be .ytd.
+        if (!isAllowedKey(slotStr)) {
+            logf("SKIP (folders must be freemode-ped collections, root files must be .ytd): %s", slotStr.c_str());
+            continue;
+        }
+        if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
+        out.push_back({ slotStr, fwd(base + childRel), Cost() });
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-    return n;
+}
+
+// The header reads ARE the cost of a big pack: one file open each, every one of them a disk
+// seek and an antivirus look. They do not touch each other, so spread them over a few threads.
+// This may only ever run OFF the loader lock (see scanFinish): a thread created inside DllMain
+// cannot start until that lock is free, so joining one there deadlocks the launch. 0.7.3 did
+// exactly that and hung on "Launching FiveM".
+struct CostJob { std::vector<Cand>* v; volatile LONG next; };
+static DWORD WINAPI costWorker(LPVOID p)
+{
+    CostJob* j = (CostJob*)p;
+    for (;;) {
+        LONG i = InterlockedIncrement(&j->next) - 1;
+        if (i < 0 || (size_t)i >= j->v->size()) return 0;
+        (*j->v)[i].c = readCost((*j->v)[i].full.c_str());
+    }
+}
+static void readCosts(std::vector<Cand>& v)
+{
+    if (v.empty()) return;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    unsigned want = si.dwNumberOfProcessors;
+    if (want < 1) want = 1;
+    if (want > 8) want = 8;
+    if (want > v.size()) want = (unsigned)v.size();
+    CostJob job = { &v, 0 };
+    HANDLE th[8]; unsigned made = 0;
+    for (unsigned i = 0; i + 1 < want; ++i) {   // this thread is one of the workers
+        HANDLE t = CreateThread(nullptr, 0, costWorker, &job, 0, nullptr);
+        if (!t) break;
+        th[made++] = t;
+    }
+    costWorker(&job);
+    for (unsigned i = 0; i < made; ++i) { WaitForSingleObject(th[i], INFINITE); CloseHandle(th[i]); }
+}
+
+static std::vector<Cand> g_cands;   // filled by walkDir in Setup, consumed by scanFinish
+static void costReport();   // defined with the budget code, which it compares the pack against
+
+// Runs on the beat thread, NOT in DllMain. Everything here opens files, and Setup() sits in
+// front of the game's entry point: doing it there meant a big pack held the loading screen
+// before the game had even started. The hook waits on g_scanDone before it registers anything,
+// so the game gets on with its own startup while this runs.
+static void scanFinish()
+{
+    ULONGLONG t0 = GetTickCount64();
+    readCosts(g_cands);
+    EnterCriticalSection(&g_cs);   // the watcher can be appending to g_ovs by now
+    int n = 0;
+    for (auto& cd : g_cands) {
+        if (tooBigJudge(cd.slot.c_str(), cd.c, false)) continue;
+        const char* slot = _strdup(cd.slot.c_str());
+        const char* file = _strdup(cd.full.c_str());   // our absolute path
+        g_ovs.push_back({ slot, file });
+        g_bySlot[slot] = file;
+        ++n;
+        if (cd.c.rsc) {
+            g_costVirt += cd.c.cv; g_costPhys += cd.c.cp;
+            if (cd.c.cv + cd.c.cp >= (8u << 20)) g_costBig.push_back({ cd.c.cv + cd.c.cp, cd.slot });
+        }
+    }
+    LeaveCriticalSection(&g_cs);
+    logf("loaded %d override(s) in %.1fs; mode %s", n, (GetTickCount64() - t0) / 1000.0, g_off ? "OFF" : "ON");
+    { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
+      for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
+      for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
+    costReport();
+    g_cands.clear(); g_cands.shrink_to_fit();
 }
 
 // pattern scan over the game module's executable sections; -1 in pat = wildcard byte
@@ -805,6 +872,14 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
 
     if (asName)
     {
+        // Outside the lock, deliberately: scanFinish takes g_cs to publish its results, so a
+        // wait with the lock held would deadlock. This is the only place the game's own thread
+        // ever waits on us, and it only ever waits once.
+        // Bounded, and skipped entirely when the plugin is off: if the scan thread never got
+        // started (a fault in Setup disables the plugin but leaves this hook live) an infinite
+        // wait here would hang the game on a plugin that is already doing nothing.
+        if (!g_off && g_scanDone && WaitForSingleObject(g_scanDone, 300000) == WAIT_TIMEOUT)
+            logf("the file scan is still running after 5 minutes — registering what it has so far");
         EnterCriticalSection(&g_cs);
 
         // capture the flag values a real streamed call uses
@@ -1076,6 +1151,36 @@ static void budgetBeat()
     }
 }
 
+// What the pack costs the streamer once every file in it is resident, and how that compares
+// with what the game is handing textures right now. Called from scanFinish.
+static void costReport()
+{
+    if (g_costVirt + g_costPhys) {
+        logf("pack cost when fully loaded: %.1f MB of texture memory + %.1f MB other. Vanilla clothing files stay well under 2 MB each; a heavy pack feeds the \"stuck on low detail / textures gone\" bug on busy servers.",
+             g_costPhys / 1048576.0, g_costVirt / 1048576.0);
+        std::sort(g_costBig.rbegin(), g_costBig.rend());
+        for (size_t i = 0; i < g_costBig.size() && i < 20; ++i)
+            logf("  HEAVY %6.1f MB  %s — likely 4K or uncompressed; shrink it to fight texture loss", g_costBig[i].first / 1048576.0, g_costBig[i].second.c_str());
+        if (g_costBig.size() > 20) logf("  ...and %zu more file(s) over 8 MB", g_costBig.size() - 20);
+        // Past ~1 GB the pack no longer fits the budget, and eviction inside GTA5.exe is
+        // passive-only (cfx #3874), so the pool saturates and the whole world drops to low LOD.
+        // That is the "textures not loading" report from players who never crash. The ceiling is
+        // a fixed table FiveM fills at boot (PatchExtendedBudgeting.cpp: 3 GB x the console-locked
+        // vid_budgetScale) with no VRAM term in it, which is why a 24 GB card saturates at exactly
+        // the same point an 8 GB one does. Say that here: without it, high-end players read the
+        // HEAVY list as a low-end problem and assume their hardware already covers it.
+        // compare against what the game is giving RIGHT NOW; the budget line on the first beat
+        // reports separately whether that ceiling then got raised
+        if (g_costPhys >= (1024ull << 20) && g_budgetCurr) {
+            logf("  the game is currently giving textures %.1f GB in total, and that has to cover the whole world, not just your pack. %s",
+                 g_budgetCurr / 1073741824.0,
+                 g_costPhys < g_budgetCurr / 2
+                   ? "Your pack fits with room to spare."
+                   : "Your pack takes a large share of that, which is what makes textures drop out. Shrink the HEAVY files above (CodeWalker, Tools, Shrink Textures).");
+        }
+    }
+}
+
 static void Setup()
 {
     char self[MAX_PATH]; GetModuleFileNameA(g_self, self, MAX_PATH);
@@ -1102,11 +1207,12 @@ static void Setup()
       logf("================ texoverride " TEXOVERRIDE_VERSION " loaded (%s) ================", d); }
     crashSaverStartup();   // quarantine anything a crash left in the journal, before the scan
     g_crashSaverRan = true;
-    int n = scanDir(std::string(g_overrideDir), "");
-    logf("loaded %d override(s); mode %s", n, g_off ? "OFF" : "ON");
-    { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
-      for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
-      for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
+    // Only the directory walk happens here. It opens no files, so it stays cheap even on a huge
+    // pack, and the expensive part (one header read per file) is left to scanFinish on the beat
+    // thread. Setup() runs in front of the game's entry point: anything slow here is boot time.
+    g_scanDone = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    walkDir(std::string(g_overrideDir), "", g_cands);
+    logf("found %zu file(s); reading their headers in the background while the game starts", g_cands.size());
     // ---- texture budget: find the table now, decide the number later -------------------------
     // The DECISION cannot happen here. Setup() runs inside DllMain under the loader lock, and
     // creating a DXGI factory there comes back empty (0.7.0 shipped with the probe here and every
@@ -1129,31 +1235,6 @@ static void Setup()
           if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
           else { g_budgetWant = 0.0; logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it"); }
       } }
-
-    if (g_costVirt + g_costPhys) {
-        logf("pack cost when fully loaded: %.1f MB of texture memory + %.1f MB other. Vanilla clothing files stay well under 2 MB each; a heavy pack feeds the \"stuck on low detail / textures gone\" bug on busy servers.",
-             g_costPhys / 1048576.0, g_costVirt / 1048576.0);
-        std::sort(g_costBig.rbegin(), g_costBig.rend());
-        for (size_t i = 0; i < g_costBig.size() && i < 20; ++i)
-            logf("  HEAVY %6.1f MB  %s — likely 4K or uncompressed; shrink it to fight texture loss", g_costBig[i].first / 1048576.0, g_costBig[i].second.c_str());
-        if (g_costBig.size() > 20) logf("  ...and %zu more file(s) over 8 MB", g_costBig.size() - 20);
-        // Past ~1 GB the pack no longer fits the budget, and eviction inside GTA5.exe is
-        // passive-only (cfx #3874), so the pool saturates and the whole world drops to low LOD.
-        // That is the "textures not loading" report from players who never crash. The ceiling is
-        // a fixed table FiveM fills at boot (PatchExtendedBudgeting.cpp: 3 GB x the console-locked
-        // vid_budgetScale) with no VRAM term in it, which is why a 24 GB card saturates at exactly
-        // the same point an 8 GB one does. Say that here: without it, high-end players read the
-        // HEAVY list as a low-end problem and assume their hardware already covers it.
-        // compare against what the game is giving RIGHT NOW; the budget line on the first beat
-        // reports separately whether that ceiling then got raised
-        if (g_costPhys >= (1024ull << 20) && g_budgetCurr) {
-            logf("  the game is currently giving textures %.1f GB in total, and that has to cover the whole world, not just your pack. %s",
-                 g_budgetCurr / 1073741824.0,
-                 g_costPhys < g_budgetCurr / 2
-                   ? "Your pack fits with room to spare."
-                   : "Your pack takes a large share of that, which is what makes textures drop out. Shrink the HEAVY files above (CodeWalker, Tools, Shrink Textures).");
-        }
-    }
 
     // tattoo placement files: *.xml at the root of tex_overrides (edited overlays.xml copies)
     { WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
@@ -1258,9 +1339,21 @@ static DWORD WINAPI UpdateCheck(LPVOID)
     return 0;
 }
 
+// SEH so a fault in the scan cannot leave the hook waiting on an event nobody will ever set.
+// (Own function: SEH inside BeatLoop's infinite loop confuses MSVC's return analysis.)
+static void scanFinishSafe()
+{
+    __try { scanFinish(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        logf("FAULT during the file scan (code %08X) — carrying on with whatever it had", GetExceptionCode());
+    }
+    if (g_scanDone) SetEvent(g_scanDone);
+}
+
 static DWORD WINAPI BeatLoop(LPVOID)
 {
     decideBudget();   // first thing off the loader lock: DXGI only works out here
+    scanFinishSafe();   // the file reads, off the loader lock at last
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
             Sleep(1000);
