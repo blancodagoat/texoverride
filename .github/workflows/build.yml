@@ -27,6 +27,19 @@ jobs:
           name: texoverride.asi
           path: texoverride.asi
 
+      # The zip is the first-install download: the plugin plus a ready-made tex_overrides with an
+      # empty folder per collection, so nobody has to guess or spell a collection name. The bare
+      # .asi stays on the release for upgrades, where overwriting somebody's folder would be wrong.
+      - name: Pack zip
+        shell: pwsh
+        run: ./tools/make-zip.ps1
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: texoverride.zip
+          path: texoverride.zip
+
       # Free, signed proof that this exact .asi came out of this repo at this commit. Does
       # nothing for antivirus scores, but it turns "trust me, CI built it" into something a
       # player can check: gh attestation verify texoverride.asi --repo <repo>
@@ -34,7 +47,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: texoverride.asi
+          subject-path: |
+            texoverride.asi
+            texoverride.zip
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -48,10 +63,15 @@ jobs:
             echo
             echo '---'
             echo
-            echo 'SHA-256 of `texoverride.asi`:'
+            echo 'Two downloads. **texoverride.zip** is the one to get if this is your first'
+            echo 'time: it holds the plugin and a ready-made `tex_overrides` folder with a'
+            echo 'folder already made for every collection you can use. **texoverride.asi** on'
+            echo 'its own is for upgrading, so your existing folder is left alone.'
+            echo
+            echo 'SHA-256:'
             echo
             echo '```'
-            sha256sum texoverride.asi | cut -d" " -f1
+            sha256sum texoverride.asi texoverride.zip
             echo '```'
             echo
             echo 'Check it was built from this repository, by this commit:'
@@ -60,5 +80,5 @@ jobs:
             echo "gh attestation verify texoverride.asi --repo $GITHUB_REPOSITORY"
             echo '```'
           } >> notes.md
-          gh release create "$GITHUB_REF_NAME" texoverride.asi --title "$GITHUB_REF_NAME" --notes-file notes.md \
-            || gh release upload "$GITHUB_REF_NAME" texoverride.asi --clobber
+          gh release create "$GITHUB_REF_NAME" texoverride.zip texoverride.asi --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            || gh release upload "$GITHUB_REF_NAME" texoverride.zip texoverride.asi --clobber

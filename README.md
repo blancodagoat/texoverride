@@ -22,12 +22,18 @@ your computer.
 
 ## Install
 
-1. Download `texoverride.asi` from [Releases](../../releases), or build it yourself (see
+1. Download `texoverride.zip` from [Releases](../../releases), or build it yourself (see
    [Build](#build)).
 2. Open File Explorer, paste `%LOCALAPPDATA%\FiveM\FiveM.app\plugins` into the address bar, and
-   press Enter. Copy `texoverride.asi` into that folder.
-3. In the same folder, create a new folder named `tex_overrides`. Your files go in there.
+   press Enter.
+3. Unzip the download into that folder. You get `texoverride.asi` and a `tex_overrides` folder
+   that already has a folder made for every collection you can use, so you never have to guess a
+   name or spell one. Empty folders you do not use cost nothing, so leave them or delete them.
 4. Start FiveM.
+
+Upgrading later? Download `texoverride.asi` on its own instead and replace just that one file. The
+zip would not delete anything you put in `tex_overrides`, but there is no reason to unpack 194
+folders a second time.
 
 The plugin only works on servers that allow plugins. Some servers block them with a setting called
 "pure mode". On those servers the plugin does nothing at all.
@@ -51,17 +57,49 @@ plugins/
       teef_012_u.ydd
 ```
 
-The plugin reads two file types. A `.ydd` file is a 3D model. A `.ytd` file holds the textures,
-which are the images painted on the model.
+A `.ydd` file is a 3D model. A `.ytd` file holds the textures, which are the images painted on
+the model.
 
-The folder name has to be exactly right. [COLLECTIONS.md](COLLECTIONS.md) lists all 186 valid
-names. This strictness is on purpose. Matching by file name alone could put the wrong thing in the
-wrong place, for example a dog's head on a human. For the same reason, the plugin only ever
-touches player-character (freemode) clothing. It refuses to touch story characters, animals,
-vehicles, props and maps.
+The folder name has to be exactly right. [COLLECTIONS.md](COLLECTIONS.md) lists every valid name.
+This strictness is on purpose. Matching by file name alone could put the wrong thing in the wrong
+place, for example a dog's head on a human. For the same reason, the plugin only touches two kinds
+of character: your own, and animals (see below). It refuses to touch story characters, vehicles,
+props and maps.
 
 If you do not know which collection an item belongs to, start the game once and read the log. It
 lists every collection the server uses and marks whether the plugin can reach it.
+
+## Replacing animals
+
+Eight animals are built exactly like your own character, out of a folder of parts:
+
+```
+a_c_chop  a_c_husky  a_c_mtlion  a_c_panther
+a_c_retriever  a_c_rottweiler  a_c_sharktiger  a_c_shepherd
+```
+
+Most animal mods you download are already laid out the way this plugin wants. Drop the folder
+straight into `tex_overrides`:
+
+```
+tex_overrides\a_c_shepherd\head_000_r.ydd
+tex_overrides\a_c_shepherd\head_diff_000_a_whi.ytd
+tex_overrides\a_c_shepherd\uppr_000_u.ydd
+```
+
+Mods usually also come with two loose files, `a_c_shepherd.yft` and `a_c_shepherd.ymt`. **Those go
+in `tex_overrides` itself, not inside the animal's folder.** Do not skip the `.ymt`. It is the file
+that tells the game which parts and which textures exist, so without it anything the mod added on
+top of the original animal cannot be picked, and the mod looks half finished.
+
+Every other animal (pug, poodle, westy, cat, coyote, deer, cow, pig, rabbit, rat, and the birds
+and fish) is one single model instead of a folder of parts. Those have no folder at all. Put
+`a_c_<name>.ydd`, `.ytd`, `.yft` and `.ymt` straight into `tex_overrides`.
+
+One thing to know first: a model built on a different skeleton than the original animal will not
+work, because the skeleton lives in a part of the game files this plugin cannot reach. Retextures
+and remodels that keep the original skeleton are fine, and that is what nearly every animal mod
+is.
 
 ## Replacing tattoos, skin and other overlays
 
@@ -436,6 +474,8 @@ binary attached.
 - Placement `.xml` files need at least 3 presets, and most of them must be unedited, or the safety
   check cannot verify the file and skips it.
 - Client-side only. Other players and the server see no difference.
+- Animal mods that need a different skeleton cannot work. Only `.ytd`, `.ydd`, `.yft` and `.ymt`
+  can be handed to the game this way, and the skeleton is in none of them.
 
 ## Files
 
@@ -444,7 +484,9 @@ dllmain.cpp             the plugin: folder scan, hook, overrides, tattoo placeme
 build.bat               MSVC build
 texoverride.rc          FX_ASI_BUILD stamp
 minhook/                vendored MinHook with the Freeze() patch
-COLLECTIONS.md          all 186 valid collection folder names
+COLLECTIONS.md          every valid collection folder name, characters and animals
+tools/make-zip.ps1      packs the release zip, folder list read from COLLECTIONS.md
+tools/gate_test.bat     runs the safety-gate cases against the real code in dllmain.cpp
 docs/overlay_index.tsv  every vanilla tattoo and overlay: name, file, position, texture
 docs/client-side-dlc-packs.md  how to run a DLC pack client side on FiveM (not texoverride)
 CHANGELOG.md            what changed in each version

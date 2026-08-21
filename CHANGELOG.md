@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 (2026-08-21)
+
+- Animals work now. Eight of them are built the same way your own character is, out of a folder of
+  parts: chop, husky, mtlion, panther, retriever, rottweiler, sharktiger and shepherd. Most dog
+  mods you can download are already laid out the way this plugin wants, so the folder goes straight
+  into `tex_overrides` and that is the whole install.
+- Mods for those animals also ship two loose files, a `.yft` and a `.ymt`, and both are accepted
+  now. They go in `tex_overrides` itself rather than in the animal's folder. The `.ymt` is the
+  important one: it is what tells the game which parts and textures exist, so without it anything
+  the mod added on top of the original animal cannot be picked and the mod looks half finished.
+- Animals that are one single model instead of a folder of parts (pug, poodle, westy, cat, coyote,
+  deer, and the rest) work too. Their files go straight into `tex_overrides` with no folder.
+- Releases now come as a zip as well. It holds the plugin plus a ready-made `tex_overrides` with a
+  folder already created for every collection you can use, so nobody has to guess a name or spell
+  one. The plugin on its own is still there for upgrading, so your own folder is left alone.
+- Nothing else got easier to touch. Story characters, vehicles, weapons, props, maps and scripts
+  are refused exactly as before, and there is now a test that checks that on every build.
+
 ## 0.7.3 (2026-08-21)
 
 - Big packs no longer hold the game on the loading screen. Before it can start, the plugin has to
