@@ -340,7 +340,7 @@ whose target is a game-relative path under dlcpacks:
 
 ```xml
 <content>
-<add source="ragengineports.rpf">updated\dlcpacks\mods\dlc.rpf</add>
+<add source="ragengineports.rpf">update\x64\dlcpacks\mods\dlc.rpf</add>
 </content>
 ```
 
@@ -366,7 +366,7 @@ disk. None of which this touches, because it all happens inside FiveM's virtual 
 container SHADOWS it, so vanilla config resolves onto your banks with no `.rel` authoring. Ship the
 container COMPLETE (the shadow is per container, not per file) or the banks you did not include go
 silent. Confirmed working in game. What does NOT work: a mods `<archive>` targeting
-`x64udio\sfx\*.rpf` (not a mappable archive path, dropped silently), and an `addons/` overlay of
+`x64\audio\sfx\*.rpf` (not a mappable archive path, dropped silently), and an `addons/` overlay of
 `platform/audio/sfx/*.rpf` (mounts, changes nothing). Also note `mods/*.rpf` must be OPEN while
 `addons/*.rpf` must be ENCRYPTED, and tool-generated RPFs may need ArchiveFix before the game accepts
 them.
