@@ -1,12 +1,13 @@
 # Valid collection folder names
 
 These are the folder names you can create inside `plugins/tex_overrides/`. Any folder name not on
-this list is ignored. The plugin only ever touches player-character (freemode) clothing, never
-story characters, animals, vehicles, props, maps, or scripts.
+this list is ignored. The plugin only touches two kinds of ped: your own character, and animals.
+Story characters, vehicles, props, maps and scripts are never touched.
 
 Names starting with `mp_m_` are for the male character, `mp_f_` for the female one. Names ending
-in `_p` are for worn props: hats, glasses, watches, and so on. The list was read out of the game
-files themselves (game build 3751): **186 collections** in total.
+in `_p` are for worn props: hats, glasses, watches, and so on. Names starting with `a_c_` are
+animals. The list was read out of the game files themselves (game build 3751): **186 character
+collections** and **8 animal collections**.
 
 Usage: put your file inside a folder with the collection's name, like
 `tex_overrides/mp_m_freemode_01_mp_m_airraces_01/uppr_003_u.ydd`.
@@ -199,7 +200,31 @@ Usage: put your file inside a folder with the collection's name, like
 - `mp_m_freemode_01_p_mp_m_valentines_02`
 - `mp_m_freemode_01_p_mp_m_vinewood`
 
+## Animals
+
+Eight animals are built the same way your character is, out of a folder of parts. Put files in a
+folder named after the animal, like `tex_overrides/a_c_shepherd/head_000_r.ydd`.
+
+- `a_c_chop`
+- `a_c_husky`
+- `a_c_mtlion`
+- `a_c_panther`
+- `a_c_retriever`
+- `a_c_rottweiler`
+- `a_c_sharktiger`
+- `a_c_shepherd`
+
+Most animal mods also ship two loose files next to that folder, `a_c_<name>.yft` and
+`a_c_<name>.ymt`. Those go straight in `tex_overrides/`, not in the animal's folder. The `.ymt` is
+the one that matters: without it, any part or texture the mod adds on top of what the animal
+already had cannot be picked, so the mod looks half applied.
+
+Every other animal is one single model instead of a folder of parts: pug, poodle, westy, cat,
+coyote, deer, boar, cow, pig, hen, rabbit, rat, chimp, rhesus, crow, pigeon, seagull, cormorant,
+chickenhawk, fish, dolphin, whale, killer whale, stingray, hammerhead. Those have no folder at
+all. Drop `a_c_<name>.ydd`, `.ytd`, `.yft` and `.ymt` straight into `tex_overrides/`.
+
 ## Blocked (never touched)
-Story / ambient / animal peds and every non-ped asset. Examples the scan found and the gate refuses:
+Story and ambient peds and every non-ped asset. Examples the scan found and the gate refuses:
 `ig_lamardavis`, `cs_movpremf_01`, `player_one`, `mp_m_niko_01`, `mp_f_misty_01`, `hc_gunman`, plus
 all vehicles, weapons, props, maps and scripts (which never carry ped-component filenames anyway).

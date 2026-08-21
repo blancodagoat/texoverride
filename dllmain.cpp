@@ -166,7 +166,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.7.3"
+#define TEXOVERRIDE_VERSION "0.8.0"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -182,29 +182,58 @@ static const char* rel(const char* file)
 // SAFETY: only human freemode-ped collections may be touched. Everything else — animal peds
 // (canine…), story/ambient peds (a_*, ig_*, cs_*), vehicles, weapons, props, maps, scripts — is
 // left strictly alone. This is what stops a "dog head replaced by a human head" mistake.
-static bool isFreemodePed(const std::string& coll)
+// SAFETY: only ped collections may be touched, and only two families of them.
+//   mp_?_freemode_01*  the player's own ped
+//   a_c_*              animal peds. The eight dogs and cats that are "streamed peds" (chop,
+//                      husky, mtlion, panther, retriever, rottweiler, sharktiger, shepherd) are
+//                      built exactly like a freemode ped: a collection folder of head_/uppr_/
+//                      lowr_/accs_/teef_ drawables and their txds. Verified against
+//                      x64e.rpf, models/cdimages/streamedpeds_a_c.rpf.
+// Everything else (story and ambient peds, vehicles, weapons, props, maps, scripts) is left
+// strictly alone.
+static bool isPedCollection(const std::string& coll)
 {
     std::string c = lower(coll);
-    return c.rfind("mp_m_freemode_01", 0) == 0 || c.rfind("mp_f_freemode_01", 0) == 0;
+    return c.rfind("mp_m_freemode_01", 0) == 0 || c.rfind("mp_f_freemode_01", 0) == 0
+        || c.rfind("a_c_", 0) == 0;
 }
 static std::string collectionOf(const std::string& key)   // "collection/file" -> "collection"
 {
     size_t s = key.find('/');
     return (s == std::string::npos) ? key : key.substr(0, s);
 }
-// A key with a slash is a clothing slot ("collection/file") and must be a freemode-ped collection.
-// A key without one is a bare-name texture dictionary: overlay txds (skin, tattoos, facepaint,
-// hair, beards, shirt decals...) live loose in the overlay rpfs and stream by filename alone.
-// A scan of every *overlay*.rpf in the game found ~100 unrelated naming families (mp_fm_skin_*,
-// *_tat_*, mp_*_tee_*, hwskull_*, ...) plus arbitrarily-named server packs, so no name whitelist
-// can work. The gate for bare names is type + exactness instead: .ytd only (a texture cannot
-// cross-wire a model slot), and it only ever replaces the dictionary whose exact name it bears.
+static bool hasExt(const std::string& k, const char* e)
+{
+    return k.size() > 4 && k.compare(k.size()-4, 4, e) == 0;
+}
+// Every type the plugin will even consider. The policy gate is isAllowedKey; this exists so the
+// folder walk can stop early on readmes, archives and loose textures.
+static bool isOverrideExt(const std::string& ln)
+{
+    return hasExt(ln, ".ytd") || hasExt(ln, ".ydd") || hasExt(ln, ".yft") || hasExt(ln, ".ymt");
+}
+// A key with a slash is a component slot ("collection/file") and its collection must be one of
+// the two families above.
+//
+// A key without one is a bare-name asset. Overlay txds (skin, tattoos, facepaint, hair, beards,
+// shirt decals...) live loose in the overlay rpfs and stream by filename alone, and a scan of
+// every *overlay*.rpf found ~100 unrelated naming families plus arbitrarily-named server packs,
+// so no name whitelist can work there. The gate is type + exactness instead: .ytd only, matching
+// the dictionary whose exact name it bears.
+//
+// Animal peds are the exception. Most of them (pug, poodle, westy, cat, coyote, deer...) are not
+// collection-based at all: model, fragment and variation metadata are bare a_c_<name>.ydd/.yft/
+// .ymt files. The eight collection-based ones still keep their .yft and .ymt at the root beside
+// the folder, and the .ymt is what makes any drawable or texture a mod ADDS on top of vanilla
+// selectable at all. So those three types are allowed at the root, for a_c_ names only.
 static bool isAllowedKey(const std::string& key)
 {
     size_t s = key.find('/');
-    if (s == std::string::npos)
-        return key.size() > 4 && key.compare(key.size()-4, 4, ".ytd") == 0;
-    return isFreemodePed(key.substr(0, s));
+    if (s != std::string::npos)
+        return isPedCollection(key.substr(0, s)) && (hasExt(key, ".ydd") || hasExt(key, ".ytd"));
+    if (hasExt(key, ".ytd")) return true;
+    return lower(key).rfind("a_c_", 0) == 0
+        && (hasExt(key, ".ydd") || hasExt(key, ".yft") || hasExt(key, ".ymt"));
 }
 
 // The walk itself opens nothing: it only decides which names are ours.
@@ -227,11 +256,11 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
             logf("IGNORED %s — .meta files hold shop data (prices/menus), not looks; see README", fwd(childRel).c_str());
             continue;
         }
-        if (ln.size() <= 4 || (ln.compare(ln.size()-4,4,".ytd") != 0 && ln.compare(ln.size()-4,4,".ydd") != 0)) continue;
+        if (!isOverrideExt(ln)) continue;
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
-        // SAFETY GATE: folders must be freemode-ped collections; root files must be .ytd.
+        // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
         if (!isAllowedKey(slotStr)) {
-            logf("SKIP (folders must be freemode-ped collections, root files must be .ytd): %s", slotStr.c_str());
+            logf("SKIP %s - folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", slotStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
@@ -777,12 +806,12 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
             continue;
         }
         if (sub.empty() && ln.size() > 4 && ln.compare(ln.size()-4, 4, ".xml") == 0) { if (!quiet) xmls.push_back(name); continue; }
-        if (ln.size() <= 4 || (ln.compare(ln.size()-4,4,".ytd") != 0 && ln.compare(ln.size()-4,4,".ydd") != 0)) continue;
+        if (!isOverrideExt(ln)) continue;
 
         std::string key = lower(fwd(childRel));
         if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
         if (!isAllowedKey(key)) {
-            if (isNew && !quiet) logf("SKIP (folders must be freemode-ped collections, root files must be .ytd): %s", key.c_str());
+            if (isNew && !quiet) logf("SKIP %s - folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", key.c_str());
             continue;
         }
 
