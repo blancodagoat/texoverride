@@ -181,12 +181,12 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   read this card's memory"; the 0.6.x opt-in path had the same latent bug, invisible because a zero
   only skipped a clamp. Worse in the field: one 0.7.0 player logged `FAULT during startup
   C0000005` with the log stopping exactly at the budget block, and another crashed with a
-  crash_hash of `gtavupscaler.asi+6616FB` — an unrelated ASI that also hooks DXGI. That player kept
+  crash_hash of `gtavupscaler.asi+6616FB`, an unrelated ASI that also hooks DXGI. That player kept
   the upscaler, moved to 0.7.1, and stopped crashing. Forcing DXGI to initialise under the loader
   lock while another plugin wires up its own DXGI hooks is the mechanism for both, and Cfx blames
   whichever module the fault address lands in, not the trigger. `decideBudget()` now runs it from
   the top of `BeatLoop`, the first code off the lock, and is SEH-wrapped since 0.7.2 (out there a
-  fault kills the game, not just the plugin). Probed ONCE there, not per beat — see the `ponytail:` note on `autoBudget` for the upgrade
+  fault kills the game, not just the plugin). Probed ONCE there, not per beat. See the `ponytail:` note on `autoBudget` for the upgrade
   path if alt-tabbing turns into stutter reports. `_budget.txt` still overrides; `0` in it disables.
 
 ## The overlay index (docs/overlay_index.tsv)
@@ -268,7 +268,7 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
   and `ExtraMetadataDefs.psc` (partial/leaked source — absence there is not proof of absence in the
   real binary).
 
-## Ped overlays on REMOTE peds — researched 2026-08-21, ASI is NOT the fix
+## Ped overlays on REMOTE peds (researched 2026-08-21): the ASI is NOT the fix
 
 A player reported overlays/tattoos rendering on their own ped but missing or flickering for a few
 seconds at certain camera angles on OTHER players, server-wide, while other FiveM servers are fine.
@@ -276,7 +276,7 @@ seconds at certain camera angles on OTHER players, server-wide, while other Five
 
 **The actual fix is a server convar.** `setr game_enableStableOverlaySort true` (ConVar_Replicated,
 default false, undocumented on docs.fivem.net). The game sorts decoration collections with a
-comparator that SUBTRACTS two unsigned hashes — not a valid total order — so the result depends on
+comparator that SUBTRACTS two unsigned hashes, which is not a valid total order, so the result depends on
 mount order and shifts on every resource restart. Cfx replaces the comparator at
 `location + 0x1E` behind that convar (`PatchTattooSort.cpp`). Being undocumented and replicated is
 exactly why one server breaks and others do not.
@@ -328,14 +328,14 @@ UNVERIFIED numbers nobody should re-derive: NUM_DECORATION_BITFIELDS, the sorted
 stride, kMaxCompressedTextures / kMax*BloodRenderTargets / kInvalidPedDamageSet, FindSlot absolute
 vtable indices (the +6 shift on builds >= 2802 is verified, the absolute index is not).
 
-## Client-side audio DLCs — SOLVED, and my first conclusion here was WRONG
+## Client-side audio DLCs: SOLVED, and my first conclusion here was WRONG
 
 **CORRECTION (2026-08-21, same day).** An earlier version of this section said client-side audio
 DLCs were impossible on FiveM. That was wrong, and the error was mine: I only ever tested `<add>`
 NESTED INSIDE `<archive>`, concluded from that the mods folder could only insert into archives that
 already exist, and never tried the bare form. A publicly distributed pack proved otherwise.
 
-**THE WORKING RECIPE.** A mods-folder package with a top-level `<add>` — no `<archive>` parent —
+**THE WORKING RECIPE.** A mods-folder package with a top-level `<add>`, no `<archive>` parent,
 whose target is a game-relative path under dlcpacks:
 
 ```xml
@@ -359,7 +359,7 @@ game.dat has already defined those vehicles.
 
 So: the dlcpack route is NOT closed the way the notes below claim. What IS closed is the Arxan
 archive-count limit, dlclist edits, and hash validation of the REAL `update/x64/dlcpacks/` folder on
-disk — none of which this touches, because it all happens inside FiveM's virtual view.
+disk. None of which this touches, because it all happens inside FiveM's virtual view.
 
 **Replacing BUILT-IN audio (weapons, impacts, engines) also has a client-side route, found
 2026-08-21 after three failures.** A DLC wave pack whose container folder is named the same as a base
@@ -374,14 +374,14 @@ them.
 The rest of this section is the failed ASI attempt. Its findings about the game's data file mounters
 are still accurate and reusable, but it is no longer the route anyone should take.
 
-## The failed ASI route — attempted 2026-08-21, do not retry
+## The failed ASI route (attempted 2026-08-21): do not retry
 
 Goal: play a vehicle-audio DLC (132 cars) client-side on FiveM. Everything below was proven by
 experiment on b3751; the conclusion is negative but most of the machinery is correct and reusable.
 
 **What I wrongly believed at the time.** That FiveM cannot mount a client-side dlcpack at all. The
 Arxan count limit, the dlclist refusal and the `dlcpacks/` hash validation are all real, but they
-apply to the on-disk game folder, NOT to a file placed through the mods-folder VFS — see the
+apply to the on-disk game folder, NOT to a file placed through the mods-folder VFS. See the
 correction above. The parser vocabulary really is only
 `package/Five/content/archive/path/add/source`, but `add` works at the top level of `content` with a
 game-relative target, which is the whole trick and which I never tested. Converting the DLC by merging into vanilla fails on
@@ -395,7 +395,7 @@ parse the .rel and wave packs natively. All anchors are published in Cfx LoadStr
 **PROVEN CORRECT (reuse freely):**
 - `g_dataFileTypes` = data pattern `61 44 DF 04 00 00 00 00`, array of `{uint32 hash, uint32 index}`.
   **It lives in .rdata**, so a scanner that only walks IMAGE_SCN_MEM_EXECUTE sections will never find
-  it — hence `scanModuleData()`.
+  it, hence `scanModuleData()`.
 - The table is keyed by the **case-SENSITIVE** joaat of the UPPERCASE type name (`joaatCS`). Our
   ordinary `joaat()` case-folds and does NOT work here. Cfx uppercases before hashing, which is the
   tell. Verified: `AUDIO_WAVEPACK` -> index 144, `type[0] hash=04DF4461`.
@@ -405,13 +405,13 @@ parse the .rel and wave packs natively. All anchors are published in Cfx LoadStr
 - The table is filled by the GAME progressively during session init: entirely zero for ~15s after
   the plugin loads, audio mounters present around try 14-24 of a 1Hz poll. Poll for the SPECIFIC
   types needed, not for "any mounter".
-- `CDataFileMgr::DataFile` layout and vtable slot 1 for `LoadDataFile` are right — the call reaches
+- `CDataFileMgr::DataFile` layout and vtable slot 1 for `LoadDataFile` are right: the call reaches
   the real function and runs four frames deep into game code.
 - `fiDevice::GetDevice` pattern `41 B8 07 00 00 00 48 8B F1 E8` at -0x1F. NOTE: it returns the
   DEVICE for a path prefix, it does NOT test file existence. Cfx uses
   `device->GetFileAttributes(name) != -1` for that. Do not mistake "RESOLVES" for "file is there".
 - Paths must be RAGE paths. `citizen:/` is mounted by FiveM via fiDeviceRelative to
-  `FiveM.app/citizen`, so dropping files there makes them addressable with zero new patterns —
+  `FiveM.app/citizen`, so dropping files there makes them addressable with zero new patterns,
   no need for the fiDeviceRelative vtable/object size, which are not published.
 
 **WHERE IT DIES.** `LoadDataFile` on a loose-folder path crashes inside the game's audio loader:
@@ -427,7 +427,7 @@ that gap is past where its published source goes.
   no RAGE allocator TLS. This is the same rule already written above for live reload.
 - **NEVER wrap a call INTO game code that mutates engine state in SEH.** Catching the access
   violation aborts the game's mounter half way through, the plugin carries on as if fine, and the
-  game dies minutes later looking like somebody else's bug — one attempt caught 66 faults, wedged
+  game dies minutes later looking like somebody else's bug. One attempt caught 66 faults, wedged
   loading at 70%, then CTD'd the machine. SEH is for READING memory that might be unmapped. A wrong
   call should crash at the call site, immediately and honestly.
 
