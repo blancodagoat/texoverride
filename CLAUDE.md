@@ -361,6 +361,16 @@ So: the dlcpack route is NOT closed the way the notes below claim. What IS close
 archive-count limit, dlclist edits, and hash validation of the REAL `update/x64/dlcpacks/` folder on
 disk — none of which this touches, because it all happens inside FiveM's virtual view.
 
+**Replacing BUILT-IN audio (weapons, impacts, engines) also has a client-side route, found
+2026-08-21 after three failures.** A DLC wave pack whose container folder is named the same as a base
+container SHADOWS it, so vanilla config resolves onto your banks with no `.rel` authoring. Ship the
+container COMPLETE (the shadow is per container, not per file) or the banks you did not include go
+silent. Confirmed working in game. What does NOT work: a mods `<archive>` targeting
+`x64udio\sfx\*.rpf` (not a mappable archive path, dropped silently), and an `addons/` overlay of
+`platform/audio/sfx/*.rpf` (mounts, changes nothing). Also note `mods/*.rpf` must be OPEN while
+`addons/*.rpf` must be ENCRYPTED, and tool-generated RPFs may need ArchiveFix before the game accepts
+them.
+
 The rest of this section is the failed ASI attempt. Its findings about the game's data file mounters
 are still accurate and reusable, but it is no longer the route anyone should take.
 
