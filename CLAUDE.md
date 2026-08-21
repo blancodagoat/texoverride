@@ -345,7 +345,12 @@ whose target is a game-relative path under dlcpacks:
 ```
 
 Package layout: `<pkg>.rpf` (OPEN encryption) containing `assembly.xml` plus `content/<dlc>.rpf`,
-where `source` is relative to `content/`. No vanilla dlcpack is named `mods`, so this CREATES a slot
+where `source` is relative to `content/`. `<content>` takes MANY top-level `<add>` entries, so
+several DLCs ship as one mods-folder file, each needing its own slot name; later slot wins a clash.
+Building one with CodeWalker.Core: `RpfFile.CreateFile` writes the nested rpf and THEN re-scans it,
+and that scan throws on an embedded NG-encrypted dlc.rpf even though the bytes are already complete.
+Catch it and verify by reopening the package instead. Player-facing writeup:
+`docs/client-side-dlc-packs.md`. No vanilla dlcpack is named `mods`, so this CREATES a slot
 rather than replacing one, and it needs no dlclist edit. Drop the package in `FiveM.app/mods/`.
 Requires pure mode off, same as every other mods-folder package.
 Known limitation reported by the pack author: some VANILLA vehicles cannot take custom sound this

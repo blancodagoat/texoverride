@@ -446,6 +446,7 @@ texoverride.rc          FX_ASI_BUILD stamp
 minhook/                vendored MinHook with the Freeze() patch
 COLLECTIONS.md          all 186 valid collection folder names
 docs/overlay_index.tsv  every vanilla tattoo and overlay: name, file, position, texture
+docs/client-side-dlc-packs.md  how to run a DLC pack client side on FiveM (not texoverride)
 CHANGELOG.md            what changed in each version
 ```
 
