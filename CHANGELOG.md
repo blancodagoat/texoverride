@@ -15,6 +15,9 @@
 - Releases now come as a zip as well. It holds the plugin plus a ready-made `tex_overrides` with a
   folder already created for every collection you can use, so nobody has to guess a name or spell
   one. The plugin on its own is still there for upgrading, so your own folder is left alone.
+- The log now says whether the game had to wait for the plugin at startup, and for how long. On a
+  big pack that one line is the whole answer to "is it faster now", because the scan itself mostly
+  runs while the game is starting anyway.
 - Nothing else got easier to touch. Story characters, vehicles, weapons, props, maps and scripts
   are refused exactly as before, and there is now a test that checks that on every build.
 
