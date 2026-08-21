@@ -68,6 +68,48 @@ Where two packs define the same thing, the slot that mounts later wins.
   and then crashes inside the game's loader. A file from a pack that demonstrably works as a server
   resource crashes identically, so it is the loose-folder approach that is wrong, not the files.
 
+## Replacing built-in game audio
+
+Weapon fire, impacts, engine notes. This looks like a file replacement and every route that treats
+it as one fails silently:
+
+- A mods-folder `<archive path="x64\audio\sfx\WEAPONS_PLAYER.rpf">` is dropped. Only
+  `update.rpf`, `x64a.rpf` to `x64w.rpf` and `common.rpf` map as archive targets.
+- An `addons/` overlay carrying `platform/audio/sfx/RESIDENT.rpf` mounts once encrypted, and changes
+  nothing.
+
+The route that works is not a replacement. **A DLC wave pack whose container folder is named the same
+as a base container shadows it.** Name your `AUDIO_WAVEPACK` folder `weapons_player` and the base
+game's own config keeps asking for `WEAPONS_PLAYER\PTL_PISTOL` and lands on your bank. No `.rel`
+editing, no name tables, no merging.
+
+```
+dlc.rpf
+  setup2.xml     deviceName dlc_wepsnd, EXTRACONTENT_COMPAT_PACK, GROUP_STARTUP changeset
+  content.xml    one AUDIO_WAVEPACK per container, disabled=true, enabled by the changeset
+  x64/audio/sfx/weapons_player/   22 .awc      name matches the vanilla container
+  x64/audio/sfx/resident/         16 .awc
+```
+
+Then wrap it as a pseudo-DLC exactly like any other pack.
+
+**Ship the container complete.** The shadow is per container, not per file. A folder holding five of
+RESIDENT's sixteen banks takes the other eleven with it and collision, vehicle and explosion audio go
+quiet. Extract the vanilla container, overlay the banks you are changing, ship all of them.
+
+Cost scales with what you edited rather than what the archive contains: replacing whole archives
+meant a 150 MB `RESIDENT.rpf`, while shipping only the changed weapon banks is 4.3 MB.
+
+Two opposite requirements that are easy to invert:
+
+| Folder | Encryption |
+|---|---|
+| `mods/*.rpf` | must be **unencrypted** (`OPEN`) |
+| `addons/*.rpf` | must be **encrypted** |
+
+Either one wrong and the file is ignored with no error. If you generate an RPF with a tool rather
+than OpenIV, run ArchiveFix over it before deciding the mod does not work.
+
 ## Vanilla vehicles
 
 Expect custom sound to work on DLC and add-on vehicles and to be unreliable on **vanilla** ones. The
