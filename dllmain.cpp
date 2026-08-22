@@ -38,6 +38,7 @@
 #pragma comment(lib, "shell32.lib")
 #include <string>
 #include <vector>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
@@ -630,9 +631,18 @@ static bool g_watcherStarted = false;
 static bool g_lateDone = false;        // the held-back .ymt batch is submitted once
 
 struct LiveOp { int kind; Ov ov; uint32_t handle; };            // kind: 0 = register, 1 = re-stat
-static std::vector<LiveOp> g_opQ;                               // guarded by g_cs
+static std::deque<LiveOp> g_opQ;                                // guarded by g_cs
 static volatile LONG g_opsPending = 0;                          // batch queued, not yet drained
 static ULONGLONG g_journalClearAt = 0;                          // watcher thread only
+static volatile LONGLONG g_lastPumpWorkAt = 0;                  // caps work when PeekMessageW spins
+
+static void freeLiveOpStorage(LiveOp& op)
+{
+    free((void*)op.ov.slot);
+    free((void*)op.ov.file);
+    if (op.ov.gfile && op.ov.gfile != op.ov.file) free((void*)op.ov.gfile);
+    op.ov.slot = nullptr; op.ov.file = nullptr; op.ov.gfile = nullptr;
+}
 
 // Overwritten file: zero the raw entry's timestamp, then GetEntry re-stats it (new size picked
 // up). Without this an overwritten file keeps its old cached size — short or wild reads.
@@ -677,8 +687,15 @@ static DWORD g_pumpTid = 0;
 
 static void drainOps()   // runs on the game's main thread
 {
+    // A large folder copy must not turn into one giant game-thread frame. Pull a small bounded
+    // shard; PeekMessageW will be called again for anything left behind.
+    std::vector<LiveOp> ops;
+    ops.reserve(8);
     EnterCriticalSection(&g_cs);
-    std::vector<LiveOp> ops; ops.swap(g_opQ);
+    for (int i = 0; i < 8 && !g_opQ.empty(); ++i) {
+        ops.push_back(g_opQ.front());
+        g_opQ.pop_front();
+    }
     LeaveCriticalSection(&g_cs);
     for (auto& op : ops) {
         if (op.kind == 0) {
@@ -701,11 +718,11 @@ static void drainOps()   // runs on the game's main thread
                 // honest answer. Only brand-new NAMES are affected: editing a file the plugin
                 // already owns goes down the re-stat path and still applies live.
                 logf("live reload: %s is already loaded from the server or a DLC, and the game will not hand a name over while it runs. Restart FiveM and the plugin claims it at startup, before those mount. Editing files it already owns still applies live.", op.ov.slot);
-                free((void*)op.ov.slot); free((void*)op.ov.file);
+                freeLiveOpStorage(op);
             } else {
                 logf("live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
                      why == 2 ? "no handle came back" : "fault inside the game's register call");
-                free((void*)op.ov.slot); free((void*)op.ov.file);
+                freeLiveOpStorage(op);
             }
         } else if (op.kind == 2) {
             // deliberately held back from the startup loop (see there). The Ov here is a copy:
@@ -722,8 +739,7 @@ static void drainOps()   // runs on the game's main thread
                      why == 1 ? "the game already has that name loaded" :
                      why == 2 ? "no handle came back" : "fault inside the game's register call");
             }
-            free((void*)op.ov.slot); free((void*)op.ov.file);
-            if (op.ov.gfile && op.ov.gfile != op.ov.file) free((void*)op.ov.gfile);
+            freeLiveOpStorage(op);
         } else {
             if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
                 logf("LIVE-UPDATE  %s reread from disk; reapply the outfit or tattoo to see it", op.ov.slot);
@@ -732,7 +748,9 @@ static void drainOps()   // runs on the game's main thread
             free((void*)op.ov.slot);
         }
     }
-    InterlockedExchange(&g_opsPending, 0);
+    EnterCriticalSection(&g_cs);
+    if (g_opQ.empty()) InterlockedExchange(&g_opsPending, 0);
+    LeaveCriticalSection(&g_cs);
 }
 
 static BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
@@ -741,7 +759,14 @@ static BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
     // only that thread ever drains, so ops always run where Cfx runs its own registrations
     DWORD tid = GetCurrentThreadId();
     if (!g_pumpTid) g_pumpTid = tid;
-    if (g_opsPending && tid == g_pumpTid) drainOps();
+    if (g_opsPending && tid == g_pumpTid) {
+        // Some message loops call PeekMessageW repeatedly in one rendered frame. One shared
+        // work window every 10 ms keeps "eight per call" from becoming hundreds per frame.
+        LONGLONG now = (LONGLONG)GetTickCount64();
+        LONGLONG last = InterlockedCompareExchange64(&g_lastPumpWorkAt, 0, 0);
+        if (now - last >= 10 && InterlockedCompareExchange64(&g_lastPumpWorkAt, now, last) == last)
+            drainOps();
+    }
     return g_origPeek(m, w, a, b, r);
 }
 
@@ -772,11 +797,14 @@ static bool installPump()
 }
 
 // ---- crash saver ----
-static void journalWrite(const std::vector<LiveOp>& batch)
+static bool journalAppend(const std::vector<LiveOp>& batch)
 {
-    FILE* f; if (fopen_s(&f, g_inflightPath, "w") != 0 || !f) return;
-    for (auto& op : batch) fprintf(f, "%s\n", op.ov.slot);
-    fclose(f);
+    FILE* f; if (fopen_s(&f, g_inflightPath, "a") != 0 || !f) return false;
+    bool ok = true;
+    for (auto& op : batch) if (fprintf(f, "%s\n", op.ov.slot) < 0) { ok = false; break; }
+    if (ferror(f) || fflush(f) != 0) ok = false;
+    if (fclose(f) == EOF) ok = false;
+    return ok;
 }
 
 // Same journal, one key, for the startup registration loop. That loop hands the game one file at
@@ -914,19 +942,49 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
 // Hand a batch to the game thread: journal first (crash saver), one batch in flight at a time.
 static void submitBatch(std::vector<LiveOp>& batch)
 {
-    // the previous batch drains within a frame; if the game thread stopped pumping (shutdown,
-    // hang) give up after 10s instead of wedging the watcher
-    for (int i = 0; InterlockedCompareExchange(&g_opsPending, 0, 0) && i < 200; ++i) Sleep(50);
-    if (g_opsPending) {
-        logf("live reload: game thread is not draining changes, dropping this batch");
-        for (auto& op : batch) { free((void*)op.ov.slot); free((void*)op.ov.file); }
+    // Keep accepted changes queued and let the game-thread pump consume bounded shards. Appending
+    // preserves every slot that is still inside the crash-saver risk window.
+    if (!journalAppend(batch)) {
+        logf("live reload: could not write the crash-saver journal, so this batch was not applied");
+        for (auto& op : batch) freeLiveOpStorage(op);
         return;
     }
-    journalWrite(batch);
+
+    size_t dropped = 0;
     EnterCriticalSection(&g_cs);
-    for (auto& op : batch) g_opQ.push_back(op);
+    try {
+        for (auto& op : batch) {
+            auto same = std::find_if(g_opQ.begin(), g_opQ.end(), [&](const LiveOp& queued) {
+                return strcmp(queued.ov.slot, op.ov.slot) == 0;
+            });
+            if (same != g_opQ.end()) {
+                // A re-stat cannot replace a registration that has not run yet: there is no raw
+                // handle to refresh until that registration succeeds. Keep the pending register;
+                // it already points at the same on-disk path and will read the newest bytes.
+                if ((same->kind == 0 || same->kind == 2) && op.kind == 1) continue;
+
+                // A later registration supersedes a queued re-stat, and like-for-like changes
+                // collapse to the newest operation for that slot.
+                freeLiveOpStorage(*same);
+                *same = op;
+                op.ov.slot = nullptr; op.ov.file = nullptr; op.ov.gfile = nullptr;
+            }
+            else if (g_opQ.size() < 2048) {
+                g_opQ.push_back(op);
+                op.ov.slot = nullptr; op.ov.file = nullptr; op.ov.gfile = nullptr;
+            }
+            else ++dropped;
+        }
+    }
+    catch (...) {
+        logf("live reload: queue allocation failed; remaining changes need a FiveM restart");
+    }
     LeaveCriticalSection(&g_cs);
-    InterlockedExchange(&g_opsPending, 1);
+    for (auto& op : batch) freeLiveOpStorage(op);
+    if (dropped) logf("live reload: queue limit reached; %zu change(s) need a FiveM restart", dropped);
+    EnterCriticalSection(&g_cs);
+    if (!g_opQ.empty()) InterlockedExchange(&g_opsPending, 1);
+    LeaveCriticalSection(&g_cs);
     g_journalClearAt = GetTickCount64() + 30000;   // journal outlives the apply; see CRASH SAVER above
 }
 

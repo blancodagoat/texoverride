@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Live changes now coalesce by streaming slot, stop at a 2,048-operation queue ceiling, and reach
+  the game thread in batches of at most eight per 10 ms work window.
+
 ## 0.8.4 (2026-08-22)
 
 - Animal `.ymt` files are now handed to the game later, about a minute after you start, instead
