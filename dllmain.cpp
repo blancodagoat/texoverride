@@ -1416,8 +1416,10 @@ static void locateRuntimePatterns()
 }
 
 // _budget.txt and the placement .xml files are user files too, so they are read out here with
-// the rest of them instead of under the loader lock.
-static void loadPostStartupConfig()
+// the rest of them instead of under the loader lock. Two functions because they sit on opposite
+// sides of the scan: the budget decision needs the file before the scan starts (see
+// backgroundStartup), and the placement parse is not needed until the first beat.
+static void readBudgetFile()
 {
     char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
     FILE* bf = nullptr;
@@ -1430,7 +1432,9 @@ static void loadPostStartupConfig()
             logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it");
         }
     }
-
+}
+static void loadPlacementFiles()
+{
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -1571,15 +1575,21 @@ static DWORD WINAPI UpdateCheck(LPVOID)
     return 0;
 }
 
+// Order matters. The budget is decided before the scan, not after: on a big pack the scan runs
+// for a long while, and for all of it the game would be stuck at its own texture ceiling. It
+// cannot go any earlier than this, because decideBudget needs the table locateRuntimePatterns
+// finds and the number _budget.txt holds.
 static void backgroundStartup()
 {
     crashSaverStartup();
     g_crashSaverRan = true;
     locateRuntimePatterns();
+    readBudgetFile();
+    decideBudget();   // DXGI only works out here, after DllMain has returned
     walkDir(std::string(g_overrideDir), "", g_cands);
     logf("found %zu file(s); reading their headers in the background while the game starts", g_cands.size());
     scanFinish();
-    loadPostStartupConfig();
+    loadPlacementFiles();
 }
 
 static bool backgroundStartupCppSafe()
@@ -1593,6 +1603,10 @@ static bool backgroundStartupCppSafe()
 // SEH so a fault in background startup cannot leave the hook waiting on an event nobody will
 // ever set. (No C++ objects in this frame, which is what makes __try legal; they live in the
 // helper. Own function: SEH inside BeatLoop's infinite loop confuses MSVC's return analysis.)
+// This now covers crashSaverStartup as well, and that is intended: a fault in there can leave
+// the journal half processed, but g_scanDone is still set and the game still boots, which beats
+// a hook waiting five minutes on a plugin that is already broken. The journal file is left where
+// it is, so the next launch gets another go at it.
 static void scanFinishSafe()
 {
     bool ok = false;
@@ -1606,8 +1620,7 @@ static void scanFinishSafe()
 
 static DWORD WINAPI BeatLoop(LPVOID)
 {
-    scanFinishSafe();   // all user-file reads and optional scans, off the loader lock
-    decideBudget();     // DXGI also only works after DllMain returns
+    scanFinishSafe();   // all user-file reads, optional scans and the budget decision, off the loader lock
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
             Sleep(1000);
