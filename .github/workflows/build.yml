@@ -1,6 +1,7 @@
 name: build
 
 on:
+  pull_request:
   push:
     branches: [main]
     tags: ["v*"]
@@ -20,6 +21,20 @@ jobs:
       - name: Build
         shell: cmd
         run: build.bat
+
+      # /Brepro makes the linker stamp a content hash instead of a clock, so the same source
+      # must produce the same bytes. Building twice and comparing is what turns that from a flag
+      # into a guarantee: anyone can build this themselves and check their .asi against the
+      # release, which is the whole answer to "is this binary really the source above it".
+      - name: Verify reproducible rebuild
+        shell: pwsh
+        run: |
+          $first = (Get-FileHash .	exoverride.asi -Algorithm SHA256).Hash
+          & .uild.bat
+          if ($LASTEXITCODE -ne 0) { throw "Second build failed with exit code $LASTEXITCODE" }
+          $second = (Get-FileHash .	exoverride.asi -Algorithm SHA256).Hash
+          if ($first -ne $second) { throw "Build is not reproducible: $first != $second" }
+          Write-Host "reproducible: $first"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
