@@ -60,11 +60,14 @@ plugins/
 A `.ydd` file is a 3D model. A `.ytd` file holds the textures, which are the images painted on
 the model.
 
-The folder name has to be exactly right. [COLLECTIONS.md](COLLECTIONS.md) lists every valid name.
-This strictness is on purpose. Matching by file name alone could put the wrong thing in the wrong
-place, for example a dog's head on a human. For the same reason, the plugin only touches two kinds
-of character: your own, and animals (see below). It refuses to touch story characters, vehicles,
-props and maps.
+The folder name has to match the collection exactly. [COLLECTIONS.md](COLLECTIONS.md) lists every
+name that came with the game, and `docs/ped_collections.tsv` has all 469 of them with file counts.
+
+Your server can add its own characters and animals too, with names that are in neither list. Those
+work: name the folder after the model. What the plugin checks instead is the files inside. They
+have to be named the way GTA names body parts, like `head_000_r.ydd` or `uppr_diff_001_a_uni.ytd`.
+That is what stops a vehicle texture or a map file being loaded onto somebody, which is the reason
+the rule exists. Story characters are still refused outright, as are vehicles, props and maps.
 
 If you do not know which collection an item belongs to, start the game once and read the log. It
 lists every collection the server uses and marks whether the plugin can reach it.
@@ -477,6 +480,10 @@ binary attached.
 - Exact matching means you need the right collection name. Servers that re-stream clothing under
   their own custom DLC collections may not use the base collection for a given menu item. Trust
   the log over the base name.
+- A `.ymt` can be replaced only if the game does not already have one under that exact name. Every
+  animal ships its own, so an animal mod's `.ymt` is refused: the call that would replace it takes
+  the game down. The rest of that mod still loads, and only parts it ADDED on top of the original
+  animal stay unpickable.
 - A reclaim changes what loads next, not what is already on screen. If an item was visible at the
   moment its slot was taken back (a server re-streamed it mid-session), take it off and put it
   back on once.

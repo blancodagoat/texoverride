@@ -224,20 +224,28 @@ coyote, deer, boar, cow, pig, hen, rabbit, rat, chimp, rhesus, crow, pigeon, sea
 chickenhawk, fish, dolphin, whale, killer whale, stingray, hammerhead. Those have no folder at
 all. Drop `a_c_<name>.ydd`, `.ytd`, `.yft` and `.ymt` straight into `tex_overrides/`.
 
-## If your mod's folder is not on this list
+## Folders this page does not list
 
-A folder name is not a label, it is the key the game looks parts up by. `docs/ped_collections.tsv`
-holds every ped collection GTA V b3751 actually ships, read straight out of the game files: 469 of
-them, with how many component or prop files each one holds and which rpf it came from.
+Since 0.8.5 the folder name is no longer what decides. What decides is whether the FILES inside are
+named the way GTA names ped parts: `head_000_r.ydd`, `uppr_diff_001_a_uni.ytd`, `p_head_000.ydd`.
+Twelve component slots (`head berd hair uppr lowr hand feet teef accs task decl jbib`), eleven prop
+anchors, then a three digit number.
 
-If a mod's folder is not in that file, the game has no slot by that name and nothing can take it
-over. That is normal for mods built for RAGE MP or singleplayer, where a pack can ADD a brand new
-ped; this plugin only ever replaces parts of peds the game already has. A dog mod laid out as
-`canine/head_000_r.ydd` is one real example: the string `canine` does not appear anywhere in GTA V,
-so those files are refused and the log says why.
+That exists because servers add their own peds and name them whatever they like. One real server
+runs its dogs as `canine`, `caninepd`, `caninesd` and `caninefd`, and its cats as `blackcat` and
+`browncat`. No prefix rule could ever have guessed those, and every one of them was refused before.
+Now they work: name the folder after the model, put the parts in, done.
 
-Animals are the short list. The game has exactly eight animal collections, and they are the eight
-named above.
+A vehicle texture, a prop drawable or a map file still cannot get in, whatever folder it sits in,
+because none of them are named like ped parts. That was the protection the folder list was really
+providing, and it is the part that stayed.
+
+`docs/ped_collections.tsv` is still worth having open. It lists every collection GTA V b3751 ships,
+469 of them, with the file counts and the rpf each came from. It answers "what is this item's real
+collection name" for anything that came with the game. It cannot answer that for a ped your server
+added, and that is what the log is for: start the game once and read the `collection:` lines.
+
+Animals are the short list. The game has exactly eight animal collections, the eight named above.
 
 ## Blocked (never touched)
 Story and ambient peds and every non-ped asset. Examples the scan found and the gate refuses:
