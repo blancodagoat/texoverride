@@ -65,6 +65,7 @@ static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
 static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
 static bool g_crashSaverRan = false;                  // gates journal deletion on orderly exit
+static volatile LONG g_journalHot = 0;                // startup registration is mid-flight in the journal
 static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH];
 
 // ---- streaming-cost audit ------------------------------------------------------------------
@@ -170,7 +171,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.8.1"
+#define TEXOVERRIDE_VERSION "0.8.2"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -271,7 +272,7 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
         // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
         if (!isAllowedKey(slotStr)) {
-            logf("SKIP %s - folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", slotStr.c_str());
+            logf("SKIP %s - that folder is not a collection this game has. Ped parts are keyed by collection name, so a folder GTA V does not ship (an add-on ped from a RAGE MP or singleplayer pack, for example) has no slot to take over. Folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", slotStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
@@ -830,7 +831,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         std::string key = lower(fwd(childRel));
         if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
         if (!isAllowedKey(key)) {
-            if (isNew && !quiet) logf("SKIP %s - folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", key.c_str());
+            if (isNew && !quiet) logf("SKIP %s - that folder is not a collection this game has. Ped parts are keyed by collection name, so a folder GTA V does not ship (an add-on ped from a RAGE MP or singleplayer pack, for example) has no slot to take over. Folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", key.c_str());
             continue;
         }
 
@@ -965,6 +966,7 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                 uint32_t id = 0xFFFFFFFF;
                 // named in _inflight.txt for the duration of the call; if the game dies in
                 // there, the next launch quarantines this key and boots without it
+                InterlockedExchange(&g_journalHot, 1);
                 journalOne(ov.slot);
                 o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
                 ov.id = id;
@@ -972,6 +974,7 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                     ov.handle = g_mgr->entries[id].handle;
                 if (++done <= 60) logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), id, ov.handle);
             }
+            InterlockedExchange(&g_journalHot, 0);
             DeleteFileA(g_inflightPath);   // whole loop survived; nothing to quarantine
             logf("registered %d base-slot override(s)", done);
             if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
@@ -1487,10 +1490,17 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
     }
     else if (reason == DLL_PROCESS_DETACH) {
         // orderly exit = no crash: the live-change journal must not quarantine anything.
-        // A real crash never reaches this line, which is the whole point.
         // only after crashSaverStartup has processed any leftover journal: if Setup faulted
-        // before that point, deleting here would erase the previous crash's evidence
-        if (g_crashSaverRan && g_inflightPath[0]) DeleteFileA(g_inflightPath);
+        // before that point, deleting here would erase the previous crash's evidence.
+        //
+        // g_journalHot is the important half. "A real crash never reaches this line" was an
+        // ASSUMPTION, and it is wrong often enough to matter: FiveM catches the fault, shows its
+        // crash dialog, uploads a report and then tears the process down, and that path can run
+        // detach for every loaded module. Deleting the journal there erases the name of the file
+        // that just killed the game, so the next launch has nothing to quarantine and dies in the
+        // same place forever. While the startup loop holds a key in the journal, leave it alone.
+        if (g_crashSaverRan && g_inflightPath[0] && !InterlockedCompareExchange(&g_journalHot, 0, 0))
+            DeleteFileA(g_inflightPath);
     }
     return TRUE;
 }

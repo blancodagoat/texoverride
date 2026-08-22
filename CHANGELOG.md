@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.2 (2026-08-22)
+
+- The protection added in 0.8.1 did not actually work, and this fixes it. It writes down which
+  file the game is holding, so a crash can be traced to one file and that file skipped next
+  launch. But FiveM catches the crash, shows its report window and then closes the game down
+  tidily, and on the way out the plugin was wiping the note it had just written. So the next
+  launch had nothing to go on and crashed in the same place again, forever. The note now survives.
+- The log now explains a refused folder instead of just listing the rule. Mods built for RAGE MP
+  or singleplayer can ADD a whole new animal, and their folder is named after a ped GTA V does not
+  have. This plugin only replaces parts of animals and characters already in the game, so there is
+  no slot for those files to take over. The log says that now, in those words.
+- Added `docs/ped_collections.tsv`: every collection the game actually ships, 469 of them, read
+  out of the game files. If a mod's folder name is not in there, that is the reason it does not
+  load. The game has exactly eight animal collections, no more.
+
 ## 0.8.1 (2026-08-22)
 
 - One player's game died at startup on 0.8.0 while the plugin was handing the game an animal

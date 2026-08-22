@@ -224,6 +224,21 @@ coyote, deer, boar, cow, pig, hen, rabbit, rat, chimp, rhesus, crow, pigeon, sea
 chickenhawk, fish, dolphin, whale, killer whale, stingray, hammerhead. Those have no folder at
 all. Drop `a_c_<name>.ydd`, `.ytd`, `.yft` and `.ymt` straight into `tex_overrides/`.
 
+## If your mod's folder is not on this list
+
+A folder name is not a label, it is the key the game looks parts up by. `docs/ped_collections.tsv`
+holds every ped collection GTA V b3751 actually ships, read straight out of the game files: 469 of
+them, with how many component or prop files each one holds and which rpf it came from.
+
+If a mod's folder is not in that file, the game has no slot by that name and nothing can take it
+over. That is normal for mods built for RAGE MP or singleplayer, where a pack can ADD a brand new
+ped; this plugin only ever replaces parts of peds the game already has. A dog mod laid out as
+`canine/head_000_r.ydd` is one real example: the string `canine` does not appear anywhere in GTA V,
+so those files are refused and the log says why.
+
+Animals are the short list. The game has exactly eight animal collections, and they are the eight
+named above.
+
 ## Blocked (never touched)
 Story and ambient peds and every non-ped asset. Examples the scan found and the gate refuses:
 `ig_lamardavis`, `cs_movpremf_01`, `player_one`, `mp_m_niko_01`, `mp_f_misty_01`, `hc_gunman`, plus
