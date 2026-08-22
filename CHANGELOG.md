@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.1 (2026-08-22)
+
+- One player's game died at startup on 0.8.0 while the plugin was handing the game an animal
+  mod's `.ymt`. The `.ymt` is still loaded, because without it nothing the mod added on top of the
+  original animal can be picked. What changed is that a file which kills the game can now only do
+  it once. The plugin writes down which file the game is holding at the moment it hands it over,
+  and if the game dies right then, the next launch skips that one file, says so in the log, and
+  starts normally. Deleting `_quarantine.txt` in `tex_overrides` gives the file another try.
+  Before this, that protection only covered files you added while the game was already running.
+- Files over 32 MB are loaded again. Since 0.5.3 they were refused outright, which left a pack
+  half applied with no sign anything was wrong unless you read the log. The log still names every
+  one of them, now on a `HUGE` line, and it is still the first place to look if you crash. If one
+  of them does take the game down, the same one-launch protection above picks it up.
+- Files the plugin cannot open at all are still skipped, since there is nothing to load.
+
 ## 0.8.0 (2026-08-22)
 
 - Animals work now. Eight of them are built the same way your own character is, out of a folder of

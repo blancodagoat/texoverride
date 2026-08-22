@@ -26,7 +26,7 @@ int main()
     ALLOW("a_c_chop/teef_000_u.ydd");
     ALLOW("a_c_husky/lowr_diff_000_a_whi.ytd");
     ALLOW("a_c_panther/uppr_000_r.ydd");
-    // animals that are not collection-based: bare model, fragment and metadata
+    // animals that are not collection-based: bare model, fragment and variation metadata
     ALLOW("a_c_pug.ydd"); ALLOW("a_c_pug.ytd"); ALLOW("a_c_pug.yft"); ALLOW("a_c_pug.ymt");
     ALLOW("a_c_westy.ydd"); ALLOW("a_c_cat_01.ytd"); ALLOW("a_c_rottweiler_02.ydd");
     // freemode, unchanged

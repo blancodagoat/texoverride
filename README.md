@@ -212,8 +212,10 @@ OpenIV or CodeWalker, resize the textures to what the original used (clothing is
 512 to 1024 pixels), and save them DXT compressed. Smaller files look nearly identical on a
 character and leave the rest of the game room to breathe.
 
-If it still happens with a light pack, it is the server, not you. Set Extended Texture Budget to
-the highest value your video card allows (Settings, Graphics) and lower Texture Quality one step.
+If it still happens with a light pack, it is the server, not you. You do not need to touch the
+Extended Texture Budget slider for it: the plugin already raises that ceiling for you at startup,
+and puts it back every time the settings screen overwrites it. Lowering Texture Quality one step
+still helps.
 
 ### The budget, and why a good graphics card does not save you
 
@@ -221,12 +223,16 @@ The Extended Texture Budget slider does not set a size. It multiplies a fixed ba
 and at its maximum setting it lands at about 7.8 GB. Those are the only two numbers that matter,
 and your graphics card is in neither of them. A 24 GB card gets the same 7.8 GB ceiling as an 8 GB
 card, which is why this bug shows up on expensive builds too and why maxing the slider is often not
-enough on its own. Max it anyway, it is free, but it stops there.
+enough on its own.
 
-The plugin fixes that for you. On startup it asks Windows how much video memory it is willing to
-give the game right now, holds back a quarter of that (or 1.5 GB, whichever is more) for the parts
-of the game that are not textures, and raises the ceiling to whatever is left. You do not have to
-set anything. The log line looks like this:
+The plugin raises the ceiling for you, so the slider is not something you have to think about. It
+is still worth maxing on a smaller card, because the plugin only ever raises and never lowers: on
+an 8 GB card a maxed slider lands at 7.8 GB, which is higher than the 6 GB the plugin would pick,
+so the plugin leaves the bigger number alone. On a big card the plugin wins by miles either way.
+
+On startup it asks Windows how much video memory it is willing to give the game right now, holds
+back an eighth of that (or 2 GB, whichever is more) for the parts of the game that are not
+textures, and raises the ceiling to whatever is left. The log line looks like this:
 
 ```
 budget: sized to this PC - 18.0 GB, up from the 7.8 GB the game set
@@ -268,7 +274,10 @@ crashed, the log from the crashed session is still there.
 | indented `collection N file(s)` lines | How your files were grouped |
 | `pack cost when fully loaded: ...` | What your files cost the game in memory |
 | `HEAVY x MB file` | That file is oversized; shrink it to avoid texture loss |
-| `TOO BIG file — x MB` | Over 32 MB; not loaded because files that big crash the game |
+| `HUGE file, x MB` | Over 32 MB; it is loaded, but shrink it first if you start crashing |
+| `CRASH SAVER: ...` | Last run died on a file; it is skipped this launch so you can get in |
+| `QUARANTINED file` | Skipped after a crash; delete `_quarantine.txt` to try it again |
+| `IGNORED file` | Not a type the game can be handed this way; the reason is on the line |
 | `budget: sized to this PC ...` | The texture budget was raised to fit your card |
 | `texture budget: a -> b GB` | The raise was written into the game |
 | `placement: collection ... N preset(s)` | Your edited `.xml` was read |
