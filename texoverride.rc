@@ -1,17 +1,18 @@
 // FiveM (asi-five) refuses any .asi on game build 2189+ that does not claim support for the running
 // build. It does FindResource(module, L"FX_ASI_BUILD", MAKEINTRESOURCE(GetGameBuild())), so the
 // resource NAME is FX_ASI_BUILD and its TYPE is the build number. One line per supported build.
-// Your FiveM logs show b3751; 3788 is added as a near-future cushion. Add more lines as builds move.
+// The current GTAW Legacy logs show b3751. Add another build only after its patterns and runtime
+// behavior have been tested; claiming an unknown build is unsafe for a plugin that writes resolved
+// game memory.
 FX_ASI_BUILD 3751 BEGIN "\0" END
-FX_ASI_BUILD 3788 BEGIN "\0" END
 
 // Version resource. An unsigned binary with NO version info at all is itself a weighting factor
 // in Defender's ML and SmartScreen scoring, and it leaves a player who right-clicks the file with
 // nothing to look at. Keep FILEVERSION/PRODUCTVERSION in step with TEXOVERRIDE_VERSION on bumps.
 // Literal numbers rather than the winver.h names so the .rc never depends on an include path.
 1 VERSIONINFO
-FILEVERSION    0,7,3,0
-PRODUCTVERSION 0,7,3,0
+FILEVERSION    0,7,3,1
+PRODUCTVERSION 0,7,3,1
 FILEFLAGSMASK  0x3fL
 FILEFLAGS      0x0L
 FILEOS         0x40004L
@@ -22,15 +23,15 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName",      "blancodagoat"
-            VALUE "FileDescription",  "texoverride - draws your own .ydd and .ytd files on your ped in FiveM"
-            VALUE "FileVersion",      "0.7.3.0"
+            VALUE "CompanyName",      "emK fork, based on blancodagoat texoverride"
+            VALUE "FileDescription",  "texoverride emK performance fork - client-side FiveM clothing overrides"
+            VALUE "FileVersion",      "0.7.3-emk.1"
             VALUE "InternalName",     "texoverride"
-            VALUE "LegalCopyright",   "Copyright (c) 2026 blancodagoat. MIT licensed."
+            VALUE "LegalCopyright",   "Copyright (c) 2026 blancodagoat and emK contributors. MIT licensed."
             VALUE "OriginalFilename", "texoverride.asi"
-            VALUE "ProductName",      "texoverride"
-            VALUE "ProductVersion",   "0.7.3.0"
-            VALUE "Comments",         "Source and releases: https://github.com/blancodagoat/texoverride"
+            VALUE "ProductName",      "texoverride emK performance fork"
+            VALUE "ProductVersion",   "0.7.3-emk.1"
+            VALUE "Comments",         "Based on upstream v0.7.3: https://github.com/blancodagoat/texoverride"
         END
     END
     BLOCK "VarFileInfo"

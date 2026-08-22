@@ -38,6 +38,7 @@
 #pragma comment(lib, "shell32.lib")
 #include <string>
 #include <vector>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
@@ -47,6 +48,8 @@
 #include <cmath>
 #include <ctime>
 #include <algorithm>
+#include <exception>
+#include <new>
 #include "MinHook.h"
 
 static HINSTANCE g_self;
@@ -57,10 +60,13 @@ struct Ov {
     const char* slot; const char* file;   // both persistent, forward-slash, lowercased
     uint32_t id = 0xFFFFFFFF;             // global streaming index our claim landed on
     uint32_t handle = 0;                  // the handle value that points at OUR file
+    HANDLE lease = INVALID_HANDLE_VALUE;  // read-only process-lifetime lock on validated bytes
 };
 static std::vector<Ov> g_ovs;
 static HANDLE g_scanDone = nullptr;   // set once g_ovs is final; the hook waits on it
+static HANDLE g_registerDone = nullptr; // set after the one-time engine registration pass
 static std::unordered_map<std::string, const char*> g_bySlot;   // slot -> file
+static std::unordered_map<std::string, size_t> g_indexBySlot;   // slot -> stable g_ovs index
 static std::unordered_set<std::string> g_collSeen;   // distinct collections, for the map
 static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
 static bool g_crashSaverRan = false;                  // gates journal deletion on orderly exit
@@ -88,18 +94,6 @@ static uint64_t rscSizeFromFlags(uint32_t f)
                    + (((f >> 4)  & 0x1)  << 8);
     return (0x200ull << (f & 0xF)) * pages;
 }
-static bool rscCost(const char* path, uint64_t* virt, uint64_t* phys)
-{
-    FILE* fp = nullptr;
-    if (fopen_s(&fp, path, "rb") || !fp) return false;
-    uint32_t h[4] = {};
-    size_t got = fread(h, sizeof(uint32_t), 4, fp);
-    fclose(fp);
-    if (got != 4 || h[0] != 0x37435352) return false;   // 'RSC7'
-    *virt = rscSizeFromFlags(h[2]);
-    *phys = rscSizeFromFlags(h[3]);
-    return true;
-}
 static void probeVram();   // defined with the budget raiser below; fills g_vramTotal/g_vramBudget
 static uint64_t g_costVirt, g_costPhys;
 static std::vector<std::pair<uint64_t, std::string>> g_costBig;   // files >= 8 MB in memory
@@ -111,25 +105,40 @@ static void logf(const char* fmt, ...);
 // summer-maine-steak crash twice over: five files with 64 MB graphics segments (removal test),
 // then a player crashing on mesh files whose 77+ MB sat in the virtual segment while graphics
 // stayed under the line — same crash address both times. 32 MB per segment is verified fine.
-// When the header cannot be read (locked by antivirus, mid-copy) the on-disk size stands in,
-// so the gate never fails open.
-// Reading the header and judging it are separate so the startup scan can do the reads on
-// several threads and then judge them in file order.
-struct Cost { uint64_t cv, cp; bool readable, rsc; };
+// A missing, unreadable or malformed header is rejected. The compressed on-disk size is not a
+// safe substitute for decoded RSC memory and must never let an unknown resource through.
+// Reading the header and judging it are separate so the startup scan can collect costs first
+// and then judge them deterministically in file order.
+enum class CostState : uint8_t { ValidRsc, Unreadable, InvalidHeader };
+struct Cost { uint64_t cv = 0, cp = 0, disk = 0; CostState state = CostState::Unreadable; };
 static Cost readCost(const char* path)
 {
-    Cost c = { 0, 0, true, true };
-    if (rscCost(path, &c.cv, &c.cp)) return c;
-    c.rsc = false;
-    WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) { c.readable = false; return c; }
-    c.cp = (((uint64_t)fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;   // on-disk stand-in
+    Cost c;
+    HANDLE fh = CreateFileA(path, GENERIC_READ,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (fh == INVALID_HANDLE_VALUE) return c;
+    LARGE_INTEGER size = {};
+    if (GetFileSizeEx(fh, &size) && size.QuadPart >= 0) c.disk = (uint64_t)size.QuadPart;
+    uint32_t header[4] = {};
+    DWORD got = 0;
+    bool read = ReadFile(fh, header, sizeof header, &got, nullptr) && got == sizeof header;
+    CloseHandle(fh);
+    if (!read || header[0] != 0x37435352 || c.disk <= sizeof header) { c.state = CostState::InvalidHeader; return c; }
+    c.cv = rscSizeFromFlags(header[2]);
+    c.cp = rscSizeFromFlags(header[3]);
+    if (!c.cv && !c.cp) { c.state = CostState::InvalidHeader; return c; }
+    c.state = CostState::ValidRsc;
     return c;
 }
 static bool tooBigJudge(const char* key, const Cost& c, bool quiet)
 {
-    if (!c.readable) {
+    if (c.state == CostState::Unreadable) {
         if (!quiet) logf("UNREADABLE %s — cannot open it, so it is not loaded this launch", key);
+        return true;
+    }
+    if (c.state == CostState::InvalidHeader) {
+        if (!quiet) logf("INVALID %s — not a complete RSC7 resource, so it is not loaded", key);
         return true;
     }
     uint64_t worst = (c.cv > c.cp) ? c.cv : c.cp;
@@ -138,9 +147,34 @@ static bool tooBigJudge(const char* key, const Cost& c, bool quiet)
                      key, worst / 1048576.0, (c.cv > c.cp) ? "mesh" : "texture");
     return true;
 }
-static bool tooBigToStream(const char* path, const char* key, bool quiet)
+// Revalidate immediately before a game call and keep the file read-only for the duration of
+// that call. This closes the validation/use window: an editor, sync tool or malicious junction
+// cannot replace the resource after its RSC7 header passes the gate but before registration or
+// re-stat consumes the path. The game may still open the file for reading while this lease lives.
+static HANDLE acquireSafeResource(const char* path, const char* key, bool quiet, Cost* outCost = nullptr)
 {
-    return tooBigJudge(key, readCost(path), quiet);
+    HANDLE fh = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (fh == INVALID_HANDLE_VALUE) {
+        Cost c; c.state = CostState::Unreadable;
+        tooBigJudge(key, c, quiet);
+        return INVALID_HANDLE_VALUE;
+    }
+    Cost c;
+    LARGE_INTEGER size = {};
+    if (GetFileSizeEx(fh, &size) && size.QuadPart >= 0) c.disk = (uint64_t)size.QuadPart;
+    uint32_t header[4] = {};
+    DWORD got = 0;
+    if (ReadFile(fh, header, sizeof header, &got, nullptr) && got == sizeof header &&
+        header[0] == 0x37435352 && c.disk > sizeof header) {
+        c.cv = rscSizeFromFlags(header[2]);
+        c.cp = rscSizeFromFlags(header[3]);
+        c.state = (c.cv || c.cp) ? CostState::ValidRsc : CostState::InvalidHeader;
+    }
+    else c.state = CostState::InvalidHeader;
+    if (outCost) *outCost = c;
+    if (tooBigJudge(key, c, quiet)) { CloseHandle(fh); return INVALID_HANDLE_VALUE; }
+    return fh;
 }
 
 // rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
@@ -150,23 +184,46 @@ struct StrMgr   { StrEntry* entries; char pad[16]; int numEntries; };
 static StrMgr* g_mgr = nullptr;
 
 static volatile LONG g_regTotal = 0, g_redirects = 0, g_idsReady = 0;
-static long g_reclaims = 0, g_deferred = 0;   // written by the heartbeat thread only
-static bool g_didRegister = false;
+static volatile LONG g_reclaims = 0, g_deferred = 0;
+static volatile LONG g_reassertPending = 0, g_reassertBusy = 0, g_reassertFault = 0;
+static size_t g_reassertCursor = 0;           // protected by g_reassertBusy + g_cs
+static volatile LONGLONG g_lastPumpAt = 0, g_lastPumpWorkAt = 0;
+static volatile LONG g_pumpUnavailable = 0;
+enum : LONG { REG_NOT_STARTED = 0, REG_IN_PROGRESS = 1, REG_DONE = 2, REG_FAILED = 3 };
+static volatile LONG g_reclaimBatches = 0, g_registrationState = REG_NOT_STARTED;
 static bool g_b1 = true, g_b2 = false, g_captured = false;
 static CRITICAL_SECTION g_cs;   // guards the one-time registration + the collection map (hook may run on >1 thread)
+class CsGuard {
+public:
+    explicit CsGuard(CRITICAL_SECTION& cs) : m_cs(&cs) { EnterCriticalSection(m_cs); }
+    ~CsGuard() { LeaveCriticalSection(m_cs); }
+    CsGuard(const CsGuard&) = delete;
+    CsGuard& operator=(const CsGuard&) = delete;
+private:
+    CRITICAL_SECTION* m_cs;
+};
+static SRWLOCK g_logLock = SRWLOCK_INIT;
+static FILE* g_logFile = nullptr;
+
+static LONG atomicRead(volatile LONG* value) { return InterlockedCompareExchange(value, 0, 0); }
 
 static void logf(const char* fmt, ...)
 {
-    FILE* f = nullptr;
-    if (fopen_s(&f, g_logPath, "a") != 0 || !f) return;
+    AcquireSRWLockExclusive(&g_logLock);
+    if (!g_logFile && (fopen_s(&g_logFile, g_logPath, "a") != 0 || !g_logFile)) {
+        ReleaseSRWLockExclusive(&g_logLock);
+        return;
+    }
     time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
     char ts[16]; strftime(ts, sizeof ts, "%H:%M:%S", &tm);
-    fprintf(f, "[%s] ", ts);
-    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
-    fputc('\n', f); fclose(f);
+    fprintf(g_logFile, "[%s] ", ts);
+    va_list ap; va_start(ap, fmt); vfprintf(g_logFile, fmt, ap); va_end(ap);
+    fputc('\n', g_logFile);
+    fflush(g_logFile);   // crash diagnostics stay complete without reopening the file every line
+    ReleaseSRWLockExclusive(&g_logLock);
 }
 
-#define TEXOVERRIDE_VERSION "0.7.3"
+#define TEXOVERRIDE_VERSION "0.7.3-emk.1"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -218,7 +275,17 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
         std::string name = fd.cFileName;
         if (name == "." || name == "..") continue;
         std::string childRel = rel.empty() ? name : rel + "\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { walkDir(base, childRel, out); continue; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                logf("SKIP directory junction/symlink: %s", fwd(childRel).c_str());
+                continue;
+            }
+            walkDir(base, childRel, out); continue;
+        }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            logf("SKIP file junction/symlink: %s", fwd(childRel).c_str());
+            continue;
+        }
         std::string ln = lower(name);
         // .meta (shop_tattoo.meta etc.) is shop data, not looks — not applied yet, but the
         // pack-folder layout (tex_overrides/mplowrider/shop_tattoo.meta) is the reserved
@@ -240,72 +307,82 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
     FindClose(h);
 }
 
-// The header reads ARE the cost of a big pack: one file open each, every one of them a disk
-// seek and an antivirus look. They do not touch each other, so spread them over a few threads.
-// This may only ever run OFF the loader lock (see scanFinish): a thread created inside DllMain
-// cannot start until that lock is free, so joining one there deadlocks the launch. 0.7.3 did
-// exactly that and hung on "Launching FiveM".
-struct CostJob { std::vector<Cand>* v; volatile LONG next; };
-static DWORD WINAPI costWorker(LPVOID p)
-{
-    CostJob* j = (CostJob*)p;
-    for (;;) {
-        LONG i = InterlockedIncrement(&j->next) - 1;
-        if (i < 0 || (size_t)i >= j->v->size()) return 0;
-        (*j->v)[i].c = readCost((*j->v)[i].full.c_str());
-    }
-}
+// A local balanced pack scans in about a tenth of a second. Keeping this sequential avoids child
+// workers outliving stack-owned scan state after a device/file-system fault, while the whole scan
+// still runs off the loader lock on the beat thread.
 static void readCosts(std::vector<Cand>& v)
 {
-    if (v.empty()) return;
-    SYSTEM_INFO si; GetSystemInfo(&si);
-    unsigned want = si.dwNumberOfProcessors;
-    if (want < 1) want = 1;
-    if (want > 8) want = 8;
-    if (want > v.size()) want = (unsigned)v.size();
-    CostJob job = { &v, 0 };
-    HANDLE th[8]; unsigned made = 0;
-    for (unsigned i = 0; i + 1 < want; ++i) {   // this thread is one of the workers
-        HANDLE t = CreateThread(nullptr, 0, costWorker, &job, 0, nullptr);
-        if (!t) break;
-        th[made++] = t;
-    }
-    costWorker(&job);
-    for (unsigned i = 0; i < made; ++i) { WaitForSingleObject(th[i], INFINITE); CloseHandle(th[i]); }
+    for (auto& candidate : v) candidate.c = readCost(candidate.full.c_str());
 }
 
-static std::vector<Cand> g_cands;   // filled by walkDir in Setup, consumed by scanFinish
 static void costReport();   // defined with the budget code, which it compares the pack against
+enum : LONG { SCAN_SCANNING = 0, SCAN_READY = 1, SCAN_FAILED = 2 };
+static volatile LONG g_scanState = SCAN_SCANNING;
 
 // Runs on the beat thread, NOT in DllMain. Everything here opens files, and Setup() sits in
 // front of the game's entry point: doing it there meant a big pack held the loading screen
 // before the game had even started. The hook waits on g_scanDone before it registers anything,
 // so the game gets on with its own startup while this runs.
-static void scanFinish()
+static bool scanFinish()
 {
     ULONGLONG t0 = GetTickCount64();
-    readCosts(g_cands);
-    EnterCriticalSection(&g_cs);   // the watcher can be appending to g_ovs by now
+    std::vector<Cand> cands;
+    walkDir(std::string(g_overrideDir), "", cands);
+    logf("found %zu file(s); reading their headers in the background while the game starts", cands.size());
+    ULONGLONG tw = GetTickCount64();
+    readCosts(cands);
+    ULONGLONG tr = GetTickCount64();
+
+    // Build the complete registry privately. If allocation or parsing fails, the hook never sees
+    // a half-published pack and cannot deadlock on a critical section abandoned by SEH.
+    std::vector<Ov> ovs;
+    std::unordered_map<std::string, const char*> bySlot;
+    std::unordered_map<std::string, size_t> byIndex;
+    ovs.reserve(cands.size()); bySlot.reserve(cands.size()); byIndex.reserve(cands.size());
     int n = 0;
-    for (auto& cd : g_cands) {
+    for (auto& cd : cands) {
         if (tooBigJudge(cd.slot.c_str(), cd.c, false)) continue;
         const char* slot = _strdup(cd.slot.c_str());
         const char* file = _strdup(cd.full.c_str());   // our absolute path
-        g_ovs.push_back({ slot, file });
-        g_bySlot[slot] = file;
+        if (!slot || !file) { free((void*)slot); free((void*)file); throw std::bad_alloc(); }
+        ovs.push_back({ slot, file });
+        bySlot[slot] = file;
+        byIndex[slot] = ovs.size() - 1;
         ++n;
-        if (cd.c.rsc) {
+        if (cd.c.state == CostState::ValidRsc) {
             g_costVirt += cd.c.cv; g_costPhys += cd.c.cp;
             if (cd.c.cv + cd.c.cp >= (8u << 20)) g_costBig.push_back({ cd.c.cv + cd.c.cp, cd.slot });
         }
     }
-    LeaveCriticalSection(&g_cs);
-    logf("loaded %d override(s) in %.1fs; mode %s", n, (GetTickCount64() - t0) / 1000.0, g_off ? "OFF" : "ON");
+
+    bool published = false;
+    {
+        CsGuard lock(g_cs);
+        g_ovs.swap(ovs); g_bySlot.swap(bySlot); g_indexBySlot.swap(byIndex);
+        // Publish the complete registry before READY becomes observable. A game thread that sees
+        // READY must then acquire g_cs, so keeping the lock through the transition guarantees it
+        // cannot register an empty or partially published pack. If startup already timed out, put
+        // the old registry back and discard this private result.
+        published = InterlockedCompareExchange(&g_scanState, SCAN_READY, SCAN_SCANNING) == SCAN_SCANNING;
+        if (!published) {
+            g_ovs.swap(ovs); g_bySlot.swap(bySlot); g_indexBySlot.swap(byIndex);
+        }
+    }
+    if (!published) {
+        for (auto& ov : ovs) { free((void*)ov.slot); free((void*)ov.file); }
+        logf("file scan finished after startup had already abandoned it; overrides stay disabled this session");
+        return false;
+    }
+    if (g_scanDone && !SetEvent(g_scanDone))
+        logf("file scan is ready but signaling its event failed (err %lu); state polling remains available", GetLastError());
+    logf("loaded %d override(s) in %.1fs (walk %.1fs, headers %.1fs); mode %s", n,
+         (GetTickCount64() - t0) / 1000.0, (tw - t0) / 1000.0, (tr - tw) / 1000.0,
+         g_off ? "OFF" : "ON");
     { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
       for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
       for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
     costReport();
-    g_cands.clear(); g_cands.shrink_to_fit();
+    return true;
 }
 
 // pattern scan over the game module's executable sections; -1 in pat = wildcard byte
@@ -373,21 +450,31 @@ static void parsePlacementXml(const std::string& path, const char* fname, std::v
 {
     FILE* f; if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return;
     std::string x; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    if (n > 0) { x.resize((size_t)n); x.resize(fread(&x[0], 1, (size_t)n, f)); } fclose(f);
+    if (n <= 0 || n > (16 << 20)) {
+        fclose(f);
+        logf("placement: %s is empty or over the 16 MB XML limit, ignored", fname);
+        return;
+    }
+    x.resize((size_t)n); x.resize(fread(&x[0], 1, (size_t)n, f)); fclose(f);
 
     auto text = [&](size_t from, size_t to, const char* tag, std::string& out) -> bool {
         std::string open = std::string("<") + tag + ">";
         size_t a = x.find(open, from); if (a == std::string::npos || a >= to) return false;
-        a += open.size(); size_t b = x.find('<', a); if (b == std::string::npos) return false;
+        a += open.size(); size_t b = x.find('<', a); if (b == std::string::npos || b >= to) return false;
         out = x.substr(a, b - a); return true;
     };
     auto attrf = [&](size_t from, size_t to, const char* tag, const char* attr, float& out) -> bool {
         std::string open = std::string("<") + tag;
         size_t a = x.find(open, from); if (a == std::string::npos || a >= to) return false;
-        size_t e = x.find('>', a); if (e == std::string::npos) return false;
+        size_t e = x.find('>', a); if (e == std::string::npos || e >= to) return false;
         std::string key = std::string(attr) + "=\"";
         size_t v = x.find(key, a); if (v == std::string::npos || v >= e) return false;
-        out = (float)atof(x.c_str() + v + key.size()); return true;
+        size_t q = x.find('"', v + key.size());
+        if (q == std::string::npos || q > e) return false;
+        const char* begin = x.c_str() + v + key.size(); char* end = nullptr;
+        float parsed = strtof(begin, &end);
+        if (end == begin || end != x.c_str() + q || !std::isfinite(parsed) || fabsf(parsed) > 1000.0f) return false;
+        out = parsed; return true;
     };
 
     size_t ps = x.find("<presets>"), pe = x.find("</presets>");
@@ -404,7 +491,10 @@ static void parsePlacementXml(const std::string& path, const char* fname, std::v
                && attrf(pos, end, "uvPos", "x", p.v[0]) && attrf(pos, end, "uvPos", "y", p.v[1])
                && attrf(pos, end, "scale", "x", p.v[2]) && attrf(pos, end, "scale", "y", p.v[3])
                && attrf(pos, end, "rotation", "value", p.v[4]);
-        if (ok) { p.hash = joaat(nm.c_str(), nm.size()); pc.presets.push_back(p); }
+        if (ok) {
+            if (pc.presets.size() >= 65535) { logf("placement: %s exceeds 65535 presets, ignored", fname); return; }
+            p.hash = joaat(nm.c_str(), nm.size()); pc.presets.push_back(p);
+        }
         pos = end + 7;
     }
     if (pc.presets.size() < 3) { logf("placement: %s has %zu preset(s), need 3+ to fingerprint, ignored", fname, pc.presets.size()); return; }
@@ -556,8 +646,8 @@ static GetRawStreamer_t g_getRawStreamerFn = nullptr;
 static RawGetEntry_t    g_rawGetEntryFn = nullptr;
 static bool g_watcherStarted = false;
 
-struct LiveOp { int kind; Ov ov; uint32_t handle; };            // kind: 0 = register, 1 = re-stat
-static std::vector<LiveOp> g_opQ;                               // guarded by g_cs
+struct LiveOp { int kind; Ov ov; uint32_t handle; Cost cost; }; // kind: 0 = register, 1 = re-stat
+static std::deque<LiveOp> g_opQ;                                // guarded by g_cs
 static volatile LONG g_opsPending = 0;                          // batch queued, not yet drained
 static ULONGLONG g_journalClearAt = 0;                          // watcher thread only
 
@@ -600,24 +690,123 @@ static int liveRegister(Ov& ov)
 // ---- main-thread pump: IAT shim on the game exe's PeekMessageW import ----
 typedef BOOL (WINAPI* PeekMsg_t)(LPMSG, HWND, UINT, UINT, UINT);
 static PeekMsg_t g_origPeek = nullptr;
-static DWORD g_pumpTid = 0;
+static PVOID volatile* g_peekSlot = nullptr;
+static DWORD g_gameTid = 0;   // DllMain caller continues into the game entry point (see Setup)
+
+// Inspect and update one engine slot behind an SEH boundary containing only POD locals. A bad
+// signature or stale manager pointer disables reassertion instead of crashing FiveM. The 32-bit
+// handle exchange is aligned and atomic; the request/loading flag is checked immediately first.
+static int reassertOne(const Ov& ov, uint32_t* old)
+{
+    __try {
+        if (!g_mgr || !g_mgr->entries || g_mgr->numEntries <= 0 || g_mgr->numEntries > 10000000)
+            return -1;
+        if (!ov.handle || ov.id >= (uint32_t)g_mgr->numEntries) return 0;
+        StrEntry& e = g_mgr->entries[ov.id];
+        if (e.handle == ov.handle) return 0;
+        if ((e.flags & 3) >= 2) return 2;
+        *old = e.handle;
+        InterlockedExchange((volatile LONG*)&e.handle, (LONG)ov.handle);
+        return 1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+// Commit a successful live registration as one transaction. Allocation failures roll every
+// container back while the RAII guard guarantees the global lock is never abandoned.
+static bool commitLiveAdd(const Ov& ov)
+{
+    try {
+        CsGuard lock(g_cs);
+        size_t index = g_ovs.size();
+        g_ovs.push_back(ov);
+        try {
+            if (!g_bySlot.emplace(ov.slot, ov.file).second) { g_ovs.pop_back(); return false; }
+            if (!g_indexBySlot.emplace(ov.slot, index).second) {
+                g_bySlot.erase(ov.slot); g_ovs.pop_back(); return false;
+            }
+        }
+        catch (...) {
+            g_bySlot.erase(ov.slot);
+            g_indexBySlot.erase(ov.slot);
+            g_ovs.pop_back();
+            throw;
+        }
+        return true;
+    }
+    catch (...) {
+        logf("live reload: out of memory while committing %s; restart to pick it up", ov.slot);
+        return false;
+    }
+}
+
+static void reassertShard(size_t limit)
+{
+    if (!InterlockedCompareExchange(&g_reassertPending, 0, 0) || InterlockedCompareExchange(&g_reassertFault, 0, 0) ||
+        InterlockedCompareExchange(&g_reassertBusy, 1, 0) != 0) return;
+
+    const char* firstSlot = nullptr; uint32_t firstOld = 0, firstNew = 0;
+    size_t reclaimed = 0, deferred = 0;
+    {
+        CsGuard lock(g_cs);
+        size_t done = 0;
+        while (g_reassertCursor < g_ovs.size() && done++ < limit) {
+            Ov& ov = g_ovs[g_reassertCursor++]; uint32_t old = 0;
+            int result = reassertOne(ov, &old);
+            if (result < 0) { InterlockedExchange(&g_reassertFault, 1); break; }
+            if (result == 2) { ++deferred; continue; }
+            if (result == 1) {
+                if (!firstSlot) { firstSlot = ov.slot; firstOld = old; firstNew = ov.handle; }
+                ++reclaimed;
+            }
+        }
+        if (g_reassertCursor >= g_ovs.size() || InterlockedCompareExchange(&g_reassertFault, 0, 0)) {
+            g_reassertCursor = 0;
+            InterlockedExchange(&g_reassertPending, 0);
+        }
+    }
+    InterlockedExchange(&g_reassertBusy, 0);
+
+    InterlockedExchangeAdd(&g_reclaims, (LONG)reclaimed);
+    InterlockedExchangeAdd(&g_deferred, (LONG)deferred);
+    if (reclaimed && InterlockedIncrement(&g_reclaimBatches) <= 20)
+        logf("RECLAIM %zu slot(s); first %s (%08x -> %08x)", reclaimed, firstSlot, firstOld, firstNew);
+    if (InterlockedCompareExchange(&g_reassertFault, 0, 0)) logf("re-assert: streaming pool became unreadable — disabled for this session");
+}
 
 static void drainOps()   // runs on the game's main thread
 {
-    EnterCriticalSection(&g_cs);
-    std::vector<LiveOp> ops; ops.swap(g_opQ);
-    LeaveCriticalSection(&g_cs);
+    // A large folder copy must not turn into one giant game-thread frame. Pull a small bounded
+    // shard; PeekMessageW will be called again on the next frame for anything left behind.
+    std::vector<LiveOp> ops; ops.reserve(8);
+    {
+        CsGuard lock(g_cs);
+        for (int i = 0; i < 8 && !g_opQ.empty(); ++i) {
+            ops.push_back(std::move(g_opQ.front()));
+            g_opQ.pop_front();
+        }
+    }
     for (auto& op : ops) {
         if (op.kind == 0) {
+            Cost current;
+            HANDLE lease = acquireSafeResource(op.ov.file, op.ov.slot, false, &current);
+            if (lease == INVALID_HANDLE_VALUE) {
+                logf("live reload: %s changed or disappeared before registration; skipped", op.ov.slot);
+                free((void*)op.ov.slot); free((void*)op.ov.file);
+                continue;
+            }
             int why = liveRegister(op.ov);
+            op.ov.lease = lease; // once game code sees the path, keep its validated bytes immutable
             if (why == 0) {
-                EnterCriticalSection(&g_cs);
-                g_ovs.push_back(op.ov); g_bySlot[op.ov.slot] = op.ov.file;
-                LeaveCriticalSection(&g_cs);
-                logf("LIVE-ADD  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
-                uint64_t cv = 0, cp = 0;
-                if (rscCost(op.ov.file, &cv, &cp) && cv + cp >= (8u << 20))
-                    logf("  HEAVY %.1f MB in memory — likely 4K or uncompressed; shrink it to fight texture loss", (cv + cp) / 1048576.0);
+                if (commitLiveAdd(op.ov)) {
+                    logf("LIVE-ADD  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+                    if (current.cv + current.cp >= (8u << 20))
+                        logf("  HEAVY %.1f MB in memory — likely 4K or uncompressed; shrink it to fight texture loss", (current.cv + current.cp) / 1048576.0);
+                    op.ov.slot = nullptr; op.ov.file = nullptr; op.ov.lease = INVALID_HANDLE_VALUE;
+                }
+                // The engine may retain either string after a successful call. On the extremely
+                // rare bookkeeping-allocation failure, retain them and the safety lease until exit.
+                else { op.ov.slot = nullptr; op.ov.file = nullptr; }
             } else if (why == 1) {
                 // registerRawStreamingFile refuses a slot that already holds a handle, so a
                 // name the connected server or a DLC already streams cannot be claimed this way.
@@ -628,31 +817,53 @@ static void drainOps()   // runs on the game's main thread
                 // honest answer. Only brand-new NAMES are affected: editing a file the plugin
                 // already owns goes down the re-stat path and still applies live.
                 logf("live reload: %s is already loaded from the server or a DLC, and the game will not hand a name over while it runs. Restart FiveM and the plugin claims it at startup, before those mount. Editing files it already owns still applies live.", op.ov.slot);
-                free((void*)op.ov.slot); free((void*)op.ov.file);
+                // The call reached game code even when it returned no usable ID. Keep both
+                // process-lifetime strings and the lease because the engine may have retained them.
+                op.ov.slot = nullptr; op.ov.file = nullptr;
             } else {
                 logf("live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
                      why == 2 ? "no handle came back" : "fault inside the game's register call");
-                free((void*)op.ov.slot); free((void*)op.ov.file);
+                op.ov.slot = nullptr; op.ov.file = nullptr;
             }
         } else {
-            if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
+            const char* currentPath = nullptr;
+            {
+                CsGuard lock(g_cs);
+                auto known = g_bySlot.find(op.ov.slot);
+                if (known != g_bySlot.end()) currentPath = known->second;
+            }
+            if (!currentPath) { free((void*)op.ov.slot); continue; }
+            HANDLE lease = acquireSafeResource(currentPath, op.ov.slot, false);
+            bool refreshed = lease != INVALID_HANDLE_VALUE && g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle);
+            if (lease != INVALID_HANDLE_VALUE) CloseHandle(lease);
+            if (refreshed)
                 logf("LIVE-UPDATE  %s reread from disk; reapply the outfit or tattoo to see it", op.ov.slot);
             else
                 logf("live reload: %s changed, could not refresh it, restart to apply", op.ov.slot);
             free((void*)op.ov.slot);
         }
     }
-    InterlockedExchange(&g_opsPending, 0);
+    { CsGuard lock(g_cs); if (g_opQ.empty()) InterlockedExchange(&g_opsPending, 0); }
 }
 
 static BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
 {
-    // the first caller after install is the game's main loop (it pumps every frame);
-    // only that thread ever drains, so ops always run where Cfx runs its own registrations
-    DWORD tid = GetCurrentThreadId();
-    if (!g_pumpTid) g_pumpTid = tid;
-    if (g_opsPending && tid == g_pumpTid) drainOps();
-    return g_origPeek(m, w, a, b, r);
+    // Plugins load synchronously on the launcher thread that continues into the GTA entry point.
+    // Capture that thread in DllMain instead of letting an arbitrary first PeekMessage caller
+    // claim the pump.
+    if (GetCurrentThreadId() == g_gameTid) {
+        LONGLONG now = (LONGLONG)GetTickCount64();
+        InterlockedExchange64(&g_lastPumpAt, now);
+        // Message loops may call PeekMessageW many times in one rendered frame. One shared work
+        // window every 10 ms prevents "eight per call" from becoming hundreds in one frame.
+        LONGLONG last = InterlockedCompareExchange64(&g_lastPumpWorkAt, 0, 0);
+        if (now - last >= 10 && InterlockedCompareExchange64(&g_lastPumpWorkAt, now, last) == last) {
+            if (atomicRead(&g_opsPending)) drainOps();
+            if (atomicRead(&g_reassertPending)) reassertShard(64);
+        }
+    }
+    PeekMsg_t orig = (PeekMsg_t)InterlockedCompareExchangePointer((PVOID volatile*)&g_origPeek, nullptr, nullptr);
+    return orig(m, w, a, b, r);
 }
 
 static bool installPump()
@@ -672,8 +883,9 @@ static bool installPump()
             if (strcmp((const char*)byName->Name, "PeekMessageW") != 0) continue;
             DWORD old;
             if (!VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) return false;
-            g_origPeek = (PeekMsg_t)thunk->u1.Function;
-            thunk->u1.Function = (ULONGLONG)h_peekMsg;
+            InterlockedExchangePointer((PVOID volatile*)&g_origPeek, (PVOID)thunk->u1.Function);
+            g_peekSlot = (PVOID volatile*)&thunk->u1.Function;
+            InterlockedExchangePointer((PVOID volatile*)&thunk->u1.Function, (PVOID)h_peekMsg);
             VirtualProtect(&thunk->u1.Function, sizeof(void*), old, &old);
             return true;
         }
@@ -682,32 +894,43 @@ static bool installPump()
 }
 
 // ---- crash saver ----
-static void journalWrite(const std::vector<LiveOp>& batch)
+static bool journalAppend(const std::vector<LiveOp>& batch)
 {
-    FILE* f; if (fopen_s(&f, g_inflightPath, "w") != 0 || !f) return;
-    for (auto& op : batch) fprintf(f, "%s\n", op.ov.slot);
-    fclose(f);
+    FILE* f; if (fopen_s(&f, g_inflightPath, "a") != 0 || !f) return false;
+    bool ok = true;
+    for (auto& op : batch) if (fprintf(f, "%s\n", op.ov.slot) < 0) { ok = false; break; }
+    if (ferror(f) || fflush(f) != 0) ok = false;
+    if (fclose(f) == EOF) ok = false;
+    return ok;
 }
 
 // Called at startup, before the folder scan. A leftover _inflight.txt means the game died while
 // (or moments after) those files were being applied live — quarantine them.
 static void crashSaverStartup()
 {
-    FILE* f;
+    FILE* f; bool deleteInflight = false;
     if (fopen_s(&f, g_inflightPath, "r") == 0 && f) {
-        char line[512]; bool any = false;
+        char line[512]; bool any = false, persisted = true;
         FILE* q = nullptr; fopen_s(&q, g_quarantinePath, "a");
+        if (!q) persisted = false;
         while (fgets(line, sizeof line, f)) {
             std::string k = line;
             while (!k.empty() && (k.back() == '\n' || k.back() == '\r')) k.pop_back();
             if (k.empty()) continue;
-            if (g_quarantine.insert(k).second && q) fprintf(q, "%s\n", k.c_str());
+            if (g_quarantine.insert(k).second && (!q || fprintf(q, "%s\n", k.c_str()) < 0)) persisted = false;
             any = true;
         }
-        fclose(f); if (q) fclose(q);
+        if (ferror(f)) persisted = false;
+        fclose(f);
+        if (q) {
+            if (ferror(q) || fflush(q) != 0) persisted = false;
+            if (fclose(q) == EOF) persisted = false;
+        }
         if (any) logf("CRASH SAVER: the game did not shut down cleanly right after live changes; the files involved are quarantined");
+        deleteInflight = !any || persisted;
+        if (any && !persisted) logf("CRASH SAVER: could not persist quarantine; keeping _inflight.txt and refusing those files this session");
     }
-    DeleteFileA(g_inflightPath);
+    if (deleteInflight) DeleteFileA(g_inflightPath);
     if (fopen_s(&f, g_quarantinePath, "r") == 0 && f) {
         char line[512];
         while (fgets(line, sizeof line, f)) {
@@ -724,28 +947,61 @@ static void crashSaverStartup()
 struct Snap { uint64_t wt; uint64_t size; };
 static std::unordered_map<std::string, Snap> g_snap;   // full path -> stamp; watcher thread only
 
+// A registered raw entry can reread its pathname later. If an overwrite fails the RSC gate,
+// merely declining the re-stat is not enough: the old handle could consume the new bad bytes.
+// Stop all local routing and recoverably rename the exact changed file so that stale engine
+// metadata cannot open it. The user can remove the suffix after fixing the resource.
+static void rejectActiveOverwrite(const std::string& full, const std::string& key)
+{
+    std::string rejected = full + ".texoverride-rejected-" + std::to_string(GetTickCount64());
+    bool wasActive = false;
+    {
+        CsGuard lock(g_cs);
+        for (auto itq = g_opQ.begin(); itq != g_opQ.end(); ) {
+            if (strcmp(itq->ov.slot, key.c_str()) != 0) { ++itq; continue; }
+            free((void*)itq->ov.slot); free((void*)itq->ov.file);
+            itq = g_opQ.erase(itq);
+        }
+        if (g_opQ.empty()) InterlockedExchange(&g_opsPending, 0);
+        auto it = g_indexBySlot.find(key);
+        if (it != g_indexBySlot.end() && it->second < g_ovs.size()) {
+            Ov& ov = g_ovs[it->second];
+            ov.handle = 0;
+            if (ov.lease != INVALID_HANDLE_VALUE) { CloseHandle(ov.lease); ov.lease = INVALID_HANDLE_VALUE; }
+            g_indexBySlot.erase(it); g_bySlot.erase(key);
+            wasActive = true;
+        }
+    }
+    bool moved = MoveFileExA(full.c_str(), rejected.c_str(), 0) != FALSE;
+    logf("live reload: rejected unsafe overwrite %s; local routing stopped%s. Restart FiveM. %s",
+         key.c_str(), wasActive ? "" : " (slot was not active)",
+         moved ? "The file was renamed with a .texoverride-rejected suffix; remove that suffix only after fixing it."
+               : "The file could not be renamed, so close FiveM immediately before restoring a safe copy.");
+}
+
 static void mergePlacement(std::vector<PlColl>& fresh)
 {
-    EnterCriticalSection(&g_cs);
-    for (auto& npc : fresh) {
-        PlColl* old = nullptr;
-        for (auto& pc : g_pl) if (pc.src == npc.src) { old = &pc; break; }
-        // carry a solved layout over when the file still describes the same presets, so a tuning
-        // edit applies without a fresh fingerprint (which edited values would keep failing)
-        if (old && old->solved && old->hash == npc.hash && old->presets.size() == npc.presets.size()) {
-            bool same = true;
-            for (size_t i = 0; i < npc.presets.size(); ++i)
-                if (old->presets[i].hash != npc.presets[i].hash) { same = false; break; }
-            if (same) {
-                npc.arrOff = old->arrOff; npc.nameOff = old->nameOff;
-                npc.stride = old->stride; npc.uvOff = old->uvOff; npc.solved = true;
+    {
+        CsGuard lock(g_cs);
+        for (auto& npc : fresh) {
+            PlColl* old = nullptr;
+            for (auto& pc : g_pl) if (pc.src == npc.src) { old = &pc; break; }
+            // carry a solved layout over when the file still describes the same presets, so a tuning
+            // edit applies without a fresh fingerprint (which edited values would keep failing)
+            if (old && old->solved && old->hash == npc.hash && old->presets.size() == npc.presets.size()) {
+                bool same = true;
+                for (size_t i = 0; i < npc.presets.size(); ++i)
+                    if (old->presets[i].hash != npc.presets[i].hash) { same = false; break; }
+                if (same) {
+                    npc.arrOff = old->arrOff; npc.nameOff = old->nameOff;
+                    npc.stride = old->stride; npc.uvOff = old->uvOff; npc.solved = true;
+                }
             }
+            logf("placement: %s reloaded from %s (%zu presets%s)", npc.name.c_str(), npc.src.c_str(),
+                 npc.presets.size(), npc.solved ? ", layout kept" : "");
+            if (old) *old = std::move(npc); else g_pl.push_back(std::move(npc));
         }
-        logf("placement: %s reloaded from %s (%zu presets%s)", npc.name.c_str(), npc.src.c_str(),
-             npc.presets.size(), npc.solved ? ", layout kept" : "");
-        if (old) *old = std::move(npc); else g_pl.push_back(std::move(npc));
     }
-    LeaveCriticalSection(&g_cs);
     if (g_plFault) logf("placement: NOTE — placement is disabled for this session (earlier fault), edits will apply after a restart");
 }
 
@@ -753,17 +1009,32 @@ static void mergePlacement(std::vector<PlColl>& fresh)
 // main thread. quiet = the baseline pass right after the watcher starts: it seeds the stamp map
 // (and still queues files that appeared during loading) without re-logging SKIP/IGNORED lines
 // the startup scan already wrote.
-static void rescanTree(const std::string& base, const std::string& sub, bool quiet, std::vector<std::string>& xmls, std::vector<LiveOp>& batch)
+static bool rescanTree(const std::string& base, const std::string& sub, bool quiet,
+                       std::vector<std::string>& xmls, std::vector<LiveOp>& batch,
+                       std::unordered_set<std::string>& seen)
 {
     WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((base + sub + "\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND; // an empty directory is complete
+    bool complete = true;
     do {
         std::string name = fd.cFileName;
         if (name == "." || name == "..") continue;
         std::string childRel = sub.empty() ? name : sub + "\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { rescanTree(base, childRel, quiet, xmls, batch); continue; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                if (!quiet) logf("SKIP directory junction/symlink: %s", fwd(childRel).c_str());
+                continue;
+            }
+            if (!rescanTree(base, childRel, quiet, xmls, batch, seen)) complete = false;
+            continue;
+        }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            if (!quiet) logf("SKIP file junction/symlink: %s", fwd(childRel).c_str());
+            continue;
+        }
 
         std::string full = base + childRel;
+        seen.insert(full);
         Snap now{ ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime,
                   ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow };
         auto it = g_snap.find(full);
@@ -786,47 +1057,118 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
             continue;
         }
 
-        EnterCriticalSection(&g_cs);
         uint32_t handle = 0; bool known = false;
-        for (auto& ov : g_ovs) if (key == ov.slot) { known = true; handle = ov.handle; break; }
-        LeaveCriticalSection(&g_cs);
+        {
+            CsGuard lock(g_cs);
+            auto oi = g_indexBySlot.find(key);
+            if (oi != g_indexBySlot.end() && oi->second < g_ovs.size()) {
+                known = true; handle = g_ovs[oi->second].handle;
+            }
+        }
 
         if (!known) {
-            if (!g_origPeek) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
-            if (tooBigToStream(fwd(full).c_str(), key.c_str(), quiet)) continue;   // crash gate; quiet skips the baseline re-log
-            batch.push_back({ 0, { _strdup(key.c_str()), _strdup(fwd(full).c_str()) }, 0 });
+            bool hasPump = InterlockedCompareExchangePointer((PVOID volatile*)&g_origPeek, nullptr, nullptr) != nullptr;
+            if (!hasPump) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
+            Cost cost = readCost(fwd(full).c_str());
+            if (tooBigJudge(key.c_str(), cost, quiet)) continue;   // crash gate; quiet skips the baseline re-log
+            char* slotCopy = _strdup(key.c_str()); char* fileCopy = _strdup(fwd(full).c_str());
+            if (!slotCopy || !fileCopy) {
+                free(slotCopy); free(fileCopy); logf("live reload: out of memory while queuing %s", key.c_str()); continue;
+            }
+            batch.push_back({ 0, { slotCopy, fileCopy }, 0, cost });
         }
-        else if (handle && isChanged) {
-            if ((handle >> 16) != 0)   // not in the game's own raw streamer; cannot re-stat it
+        else if (known && isChanged) {
+            Cost changed = readCost(fwd(full).c_str());
+            if (tooBigJudge(key.c_str(), changed, false))
+                rejectActiveOverwrite(fwd(full), key);
+            else if (!handle)
+                logf("live reload: %s changed but has no active raw handle; restart to apply", key.c_str());
+            else if ((handle >> 16) != 0)   // not in the game's own raw streamer; cannot re-stat it
                 logf("live reload: %s changed, restart to apply (handle %08x not raw)", key.c_str(), handle);
-            else if (!g_origPeek)
+            else if (!InterlockedCompareExchangePointer((PVOID volatile*)&g_origPeek, nullptr, nullptr))
                 logf("live reload: %s changed, restart to apply", key.c_str());
-            else if (tooBigToStream(fwd(full).c_str(), key.c_str(), false))
-                // the registered slot still points at this path with the OLD size cached, so the
-                // game may read a truncated slice of the new content; make that loud
-                logf("live reload: %s grew past the safe size and was NOT re-read; restore the smaller file or restart", key.c_str());
             else
-                batch.push_back({ 1, { _strdup(key.c_str()), nullptr }, handle });
+            {
+                char* slotCopy = _strdup(key.c_str());
+                if (!slotCopy) { logf("live reload: out of memory while queuing %s", key.c_str()); continue; }
+                batch.push_back({ 1, { slotCopy, nullptr }, handle, Cost() });
+            }
         }
     } while (FindNextFileA(h, &fd));
+    if (GetLastError() != ERROR_NO_MORE_FILES) complete = false;
     FindClose(h);
+    return complete;
+}
+
+static void pruneDeleted(const std::unordered_set<std::string>& seen, bool quiet)
+{
+    std::vector<std::string> gone;
+    for (auto& kv : g_snap) if (!seen.count(kv.first)) gone.push_back(kv.first);
+    for (auto& full : gone) {
+        g_snap.erase(full);
+        if (full.size() <= strlen(g_overrideDir)) continue;
+        std::string key = lower(fwd(full.substr(strlen(g_overrideDir))));
+        if (key.size() > 4 && (key.compare(key.size()-4, 4, ".ytd") == 0 || key.compare(key.size()-4, 4, ".ydd") == 0)) {
+            bool wasActive = false;
+            {
+                CsGuard lock(g_cs);
+                for (auto itq = g_opQ.begin(); itq != g_opQ.end(); ) {
+                    if (strcmp(itq->ov.slot, key.c_str()) != 0) { ++itq; continue; }
+                    free((void*)itq->ov.slot); free((void*)itq->ov.file);
+                    itq = g_opQ.erase(itq);
+                }
+                if (g_opQ.empty()) InterlockedExchange(&g_opsPending, 0);
+                auto it = g_indexBySlot.find(key);
+                if (it != g_indexBySlot.end() && it->second < g_ovs.size()) {
+                    Ov& ov = g_ovs[it->second];
+                    ov.handle = 0; wasActive = true;
+                    if (ov.lease != INVALID_HANDLE_VALUE) { CloseHandle(ov.lease); ov.lease = INVALID_HANDLE_VALUE; }
+                    g_indexBySlot.erase(it); g_bySlot.erase(key);
+                }
+            }
+            if (wasActive && !quiet)
+                logf("LIVE-REMOVE %s — stopped redirecting/re-asserting it; restart FiveM to restore the server or vanilla asset", key.c_str());
+        }
+        else if (key.find('/') == std::string::npos && key.size() > 4 && key.compare(key.size()-4, 4, ".xml") == 0) {
+            { CsGuard lock(g_cs); g_pl.erase(std::remove_if(g_pl.begin(), g_pl.end(), [&](const PlColl& pc) { return lower(pc.src) == key; }), g_pl.end()); }
+            if (!quiet) logf("placement: removed %s; prior in-memory writes remain until FiveM restarts", key.c_str());
+        }
+    }
 }
 
 // Hand a batch to the game thread: journal first (crash saver), one batch in flight at a time.
 static void submitBatch(std::vector<LiveOp>& batch)
 {
-    // the previous batch drains within a frame; if the game thread stopped pumping (shutdown,
-    // hang) give up after 10s instead of wedging the watcher
-    for (int i = 0; InterlockedCompareExchange(&g_opsPending, 0, 0) && i < 200; ++i) Sleep(50);
-    if (g_opsPending) {
-        logf("live reload: game thread is not draining changes, dropping this batch");
+    // Keep every accepted change queued and let the game-thread pump consume a bounded shard per
+    // frame. The journal is append-only during the risk window, so a newer batch cannot erase an
+    // older batch that may still be responsible for a crash.
+    if (!journalAppend(batch)) {
+        logf("live reload: could not write the crash-saver journal, so this batch was not applied");
         for (auto& op : batch) { free((void*)op.ov.slot); free((void*)op.ov.file); }
         return;
     }
-    journalWrite(batch);
-    EnterCriticalSection(&g_cs);
-    for (auto& op : batch) g_opQ.push_back(op);
-    LeaveCriticalSection(&g_cs);
+    size_t dropped = 0;
+    try {
+        CsGuard lock(g_cs);
+        for (auto& op : batch) {
+            auto same = std::find_if(g_opQ.begin(), g_opQ.end(), [&](const LiveOp& queued) {
+                return strcmp(queued.ov.slot, op.ov.slot) == 0;
+            });
+            if (same != g_opQ.end()) {
+                free((void*)same->ov.slot); free((void*)same->ov.file);
+                *same = op;   // pointer ownership transfers only after this non-allocating copy
+                op.ov.slot = nullptr; op.ov.file = nullptr;
+            }
+            else if (g_opQ.size() < 2048) {
+                g_opQ.push_back(op);
+                op.ov.slot = nullptr; op.ov.file = nullptr;
+            }
+            else ++dropped;
+        }
+    }
+    catch (...) { logf("live reload: queue allocation failed; remaining changes need a FiveM restart"); }
+    for (auto& op : batch) { free((void*)op.ov.slot); free((void*)op.ov.file); op.ov.slot = nullptr; op.ov.file = nullptr; }
+    if (dropped) logf("live reload: queue limit reached; %zu change(s) need a FiveM restart", dropped);
     InterlockedExchange(&g_opsPending, 1);
     g_journalClearAt = GetTickCount64() + 30000;   // journal outlives the apply; see CRASH SAVER above
 }
@@ -838,23 +1180,26 @@ static DWORD WINAPI WatchLoop(LPVOID)
         FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE);
     if (h == INVALID_HANDLE_VALUE) { logf("live reload: cannot watch tex_overrides (err %lu) — restart to apply changes", GetLastError()); return 0; }
 
-    bool pump = installPump();
-    { std::vector<std::string> ignore; std::vector<LiveOp> batch;
-      rescanTree(g_overrideDir, "", true, ignore, batch);   // baseline stamps; also catches files added during loading
+    bool pump = InterlockedCompareExchangePointer((PVOID volatile*)&g_origPeek, nullptr, nullptr) != nullptr;
+    if (!pump) pump = installPump();
+    { std::vector<std::string> ignore; std::vector<LiveOp> batch; std::unordered_set<std::string> seen;
+      bool complete = rescanTree(g_overrideDir, "", true, ignore, batch, seen);   // baseline stamps; also catches files added during loading
+      if (complete) pruneDeleted(seen, true); else logf("live reload: baseline enumeration was interrupted; deletion checks postponed");
       if (!batch.empty()) submitBatch(batch); }
     logf("live reload: watching tex_overrides (%s)", pump ? "full: edits and new files" : "edits only: no main-thread pump, new files need a restart");
 
     for (;;) {
         DWORD w = WaitForSingleObject(h, g_journalClearAt ? 1000 : INFINITE);
-        if (g_journalClearAt && GetTickCount64() >= g_journalClearAt && !g_opsPending) {
+        if (g_journalClearAt && GetTickCount64() >= g_journalClearAt && !atomicRead(&g_opsPending)) {
             DeleteFileA(g_inflightPath);   // survived the risky window; nothing to quarantine
             g_journalClearAt = 0;
         }
         if (w == WAIT_TIMEOUT) continue;
         if (w != WAIT_OBJECT_0) break;
         do { FindNextChangeNotification(h); } while (WaitForSingleObject(h, 500) == WAIT_OBJECT_0);   // debounce until quiet
-        std::vector<std::string> xmls; std::vector<LiveOp> batch;
-        rescanTree(g_overrideDir, "", false, xmls, batch);
+        std::vector<std::string> xmls; std::vector<LiveOp> batch; std::unordered_set<std::string> seen;
+        bool complete = rescanTree(g_overrideDir, "", false, xmls, batch, seen);
+        if (complete) pruneDeleted(seen, false); else logf("live reload: folder enumeration was interrupted; deletion checks postponed");
         if (!batch.empty()) submitBatch(batch);
         if (!xmls.empty()) {
             std::vector<PlColl> fresh;
@@ -862,90 +1207,139 @@ static DWORD WINAPI WatchLoop(LPVOID)
             if (!fresh.empty()) mergePlacement(fresh);
         }
     }
+    FindCloseChangeNotification(h);
     return 0;
 }
 // ========================================================================================
 
+// Register one startup override while holding a read-only lease on the exact resource that
+// passed the safety gate. The SEH frame contains only POD locals and game-memory writes.
+// 0 = registered, 1 = rejected at point of use, 2 = fault in the game's registration path.
+static int registerBaseOne(Ov& ov)
+{
+    HANDLE lease = acquireSafeResource(ov.file, ov.slot, false);
+    if (lease == INVALID_HANDLE_VALUE) return 1;
+    bool fault = false;
+    __try {
+        uint32_t id = 0xFFFFFFFF;
+        o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
+        ov.id = id;
+        if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
+            ov.handle = g_mgr->entries[id].handle;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { fault = true; }
+    if (fault) CloseHandle(lease);
+    else ov.lease = lease; // prevents overwrite/delete races for as long as FiveM can stream it
+    return fault ? 2 : 0;
+}
+
 static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asName, bool b2)
 {
     InterlockedIncrement(&g_regTotal);
-
-    if (asName)
-    {
+    try {
+      if (asName)
+      {
         // Outside the lock, deliberately: scanFinish takes g_cs to publish its results, so a
         // wait with the lock held would deadlock. This is the only place the game's own thread
         // ever waits on us, and it only ever waits once.
-        // Bounded, and skipped entirely when the plugin is off: if the scan thread never got
-        // started (a fault in Setup disables the plugin but leaves this hook live) an infinite
-        // wait here would hang the game on a plugin that is already doing nothing.
-        if (!g_off && g_scanDone && WaitForSingleObject(g_scanDone, 300000) == WAIT_TIMEOUT)
-            logf("the file scan is still running after 5 minutes — registering what it has so far");
-        EnterCriticalSection(&g_cs);
-
-        // capture the flag values a real streamed call uses
-        if (!g_captured) { g_b1 = b1; g_b2 = b2; g_captured = true; logf("captured flags: b1=%d b2=%d", (int)b1, (int)b2); }
-
-        // once the stream system is live (first call), register our files as base slot overrides.
-        // o_regRaw is the trampoline (original), so these calls do NOT re-enter this hook.
-        if (!g_off && !g_didRegister)
+        // Bounded, and skipped entirely when the plugin is off. scanFinish publishes all-or-
+        // nothing, so a timeout must fail closed instead of permanently registering an empty
+        // pack and claiming that partial results exist.
+        if (!g_off) {
+            LONG state = InterlockedCompareExchange(&g_scanState, 0, 0);
+            if (state == SCAN_SCANNING && g_scanDone) WaitForSingleObject(g_scanDone, 15000);
+            state = InterlockedCompareExchange(&g_scanState, 0, 0);
+            if (state != SCAN_READY) {
+                if (InterlockedCompareExchange(&g_scanState, SCAN_FAILED, SCAN_SCANNING) == SCAN_SCANNING) {
+                    logf("file scan did not become ready within 15 seconds — overrides disabled for this session so FiveM can continue");
+                    if (g_scanDone && !SetEvent(g_scanDone)) logf("scan timeout event signal failed (err %lu)", GetLastError());
+                }
+                return o_regRaw(fileId, name, b1, asName, b2);
+            }
+        }
         {
-            g_didRegister = true;
-            // the pool must exist by now (this very call registers into it); if it looks wrong,
-            // the manager pattern matched the wrong code — better no re-assert than a wild write
-            if (g_mgr && (!g_mgr->entries || g_mgr->numEntries <= 0 || g_mgr->numEntries > 10000000)) {
-                logf("streaming pool looks wrong (entries=%p num=%d) — re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
-                g_mgr = nullptr;
+            CsGuard lock(g_cs);
+            if (!g_captured) { g_b1 = b1; g_b2 = b2; g_captured = true; logf("captured flags: b1=%d b2=%d", (int)b1, (int)b2); }
+        }
+
+        // Exactly one hook caller owns registration. Concurrent streaming callbacks wait for its
+        // terminal state before they redirect or register overlapping slots.
+        if (!g_off) {
+            LONG registration = InterlockedCompareExchange(&g_registrationState, REG_IN_PROGRESS, REG_NOT_STARTED);
+            if (registration == REG_NOT_STARTED) {
+                if (g_mgr && (!g_mgr->entries || g_mgr->numEntries <= 0 || g_mgr->numEntries > 10000000)) {
+                    logf("streaming pool looks wrong (entries=%p num=%d) — re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
+                    g_mgr = nullptr;
+                }
+                int done = 0, rejected = 0; bool registrationFault = false;
+                for (auto& ov : g_ovs) {
+                    int result = registerBaseOne(ov);
+                    if (result == 1) {
+                        // It has no lifetime lease and must not remain redirectable. If a valid
+                        // file later appears at this path, the watcher treats it as a new add.
+                        { CsGuard lock(g_cs); g_bySlot.erase(ov.slot); g_indexBySlot.erase(ov.slot); }
+                        ++rejected; continue;
+                    }
+                    if (result == 2) { registrationFault = true; break; }
+                    if (++done <= 60) logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), ov.id, ov.handle);
+                }
+                if (registrationFault) { g_off = true; logf("FAULT during base registration — plugin disabled for this session"); }
+                logf("registered %d base-slot override(s); %d changed file(s) rejected at point of use", done, rejected);
+                if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
+                if (!registrationFault) InterlockedExchange(&g_idsReady, 1);
+                InterlockedExchange(&g_registrationState, registrationFault ? REG_FAILED : REG_DONE);
+                if (g_registerDone && !SetEvent(g_registerDone)) logf("registration event signal failed (err %lu)", GetLastError());
             }
-            int done = 0;
-            for (auto& ov : g_ovs)
-            {
-                uint32_t id = 0xFFFFFFFF;
-                o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
-                ov.id = id;
-                if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
-                    ov.handle = g_mgr->entries[id].handle;
-                if (++done <= 60) logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), id, ov.handle);
+            else {
+                if (registration == REG_IN_PROGRESS && g_registerDone) WaitForSingleObject(g_registerDone, INFINITE);
+                registration = InterlockedCompareExchange(&g_registrationState, 0, 0);
+                if (registration != REG_DONE) return o_regRaw(fileId, name, b1, asName, b2);
             }
-            logf("registered %d base-slot override(s)", done);
-            if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
-            InterlockedExchange(&g_idsReady, 1);
         }
 
         // MAP: record each distinct collection the server streams, tagged with whether we'd ever touch it
         std::string keyLower = lower(asName);
         std::string coll = collectionOf(keyLower);
-        if (g_collSeen.insert(coll).second && g_collSeen.size() <= 500)
-            logf("collection: %-40s [%s]", coll.c_str(),
-                 isAllowedKey(keyLower) ? "overridable" : "OTHER - never touched");
-
-        LeaveCriticalSection(&g_cs);
-    }
+        {
+            CsGuard lock(g_cs);
+            if (g_collSeen.insert(coll).second && g_collSeen.size() <= 500)
+                logf("collection: %-40s [%s]", coll.c_str(),
+                     isAllowedKey(keyLower) ? "overridable" : "OTHER - never touched");
+        }
+      }
 
     // redirect only exact-slot matches, and only for keys the gate allows (double guard):
     // freemode-ped collection slots, or bare-name .ytd dictionaries.
     // g_bySlot can gain entries at runtime now (live reload), so the lookup takes the lock.
-    if (!g_off && asName)
-    {
+      if (!g_off && asName)
+      {
         std::string key = lower(asName);
         if (isAllowedKey(key))
         {
             const char* redirect = nullptr;
-            EnterCriticalSection(&g_cs);
-            auto it = g_bySlot.find(key);
-            if (it != g_bySlot.end()) redirect = it->second;   // value is a leaked strdup — stable after release
-            LeaveCriticalSection(&g_cs);
+            { CsGuard lock(g_cs); auto it = g_bySlot.find(key); if (it != g_bySlot.end()) redirect = it->second; }
             if (redirect)
             {
-                InterlockedIncrement(&g_redirects);
-                if (g_redirects <= 100) logf("REDIRECT  %s  ->  tex_overrides/%s", asName, rel(redirect));
-                return o_regRaw(fileId, redirect, b1, asName, b2);
+                HANDLE lease = acquireSafeResource(redirect, key.c_str(), false);
+                if (lease != INVALID_HANDLE_VALUE) {
+                    LONG redirects = InterlockedIncrement(&g_redirects);
+                    if (redirects <= 100) logf("REDIRECT  %s  ->  tex_overrides/%s", asName, rel(redirect));
+                    uint32_t* result = o_regRaw(fileId, redirect, b1, asName, b2);
+                    CloseHandle(lease);
+                    return result;
+                }
             }
         }
+      }
+      return o_regRaw(fileId, name, b1, asName, b2);
     }
+    catch (const std::exception& e) { logf("hook bookkeeping failed: %s; using the original stream path", e.what()); }
+    catch (...) { logf("hook bookkeeping failed; using the original stream path"); }
     return o_regRaw(fileId, name, b1, asName, b2);
 }
 
 static DWORD WINAPI BeatLoop(LPVOID);
+static void uninstallPump();
 
 // Runs synchronously inside asi-five's LoadLibrary call. FiveM loads plugins in
 // LauncherInterface::PostLoadGame, which returns the game's entry point to the launcher — the
@@ -1008,11 +1402,11 @@ static void probeVram()
     HMODULE dx = LoadLibraryA(dxPath);
     if (!dx) { logf("budget: cannot load %s (err %lu)", dxPath, GetLastError()); return; }
     auto createFactory = (CreateFactory_t)GetProcAddress(dx, "CreateDXGIFactory1");
-    if (!createFactory) { logf("budget: dxgi.dll has no CreateDXGIFactory1"); return; }
+    if (!createFactory) { logf("budget: dxgi.dll has no CreateDXGIFactory1"); FreeLibrary(dx); return; }
 
     IDXGIFactory1* f = nullptr;
     HRESULT hr = createFactory(__uuidof(IDXGIFactory1), (void**)&f);
-    if (FAILED(hr) || !f) { logf("budget: CreateDXGIFactory1 failed (hr 0x%08lX)", (unsigned long)hr); return; }
+    if (FAILED(hr) || !f) { logf("budget: CreateDXGIFactory1 failed (hr 0x%08lX)", (unsigned long)hr); FreeLibrary(dx); return; }
     IDXGIAdapter1* a = nullptr; IDXGIAdapter1* best = nullptr;
     for (UINT i = 0; f->EnumAdapters1(i, &a) == S_OK; ++i) {
         DXGI_ADAPTER_DESC1 d;
@@ -1035,6 +1429,7 @@ static void probeVram()
         best->Release();
     }
     f->Release();
+    FreeLibrary(dx);
 }
 
 // Size the texture budget to this PC. FiveM hands every machine the same ceiling —
@@ -1082,15 +1477,16 @@ static uint64_t autoBudget(uint64_t current)
 
 static void budgetBeatImpl()
 {
-    if (g_vramTable[3] == g_budget) return;   // our value is standing
     uint64_t old = g_vramTable[3];
+    bool raised = false;
+    const uint64_t desired[4] = { g_budget / 2, (uint64_t)(g_budget / 1.5), g_budget, g_budget };
     for (int i = 0; i < 80; i += 4) {         // same rows, same ratios as Cfx's own writer
-        g_vramTable[i + 3] = g_budget;
-        g_vramTable[i + 2] = g_budget;
-        g_vramTable[i + 1] = (uint64_t)(g_budget / 1.5);
-        g_vramTable[i]     = g_budget / 2;
+        for (int j = 0; j < 4; ++j) {
+            if (g_vramTable[i + j] >= desired[j]) continue;
+            g_vramTable[i + j] = desired[j]; raised = true;
+        }
     }
-    if (++g_budgetWrites <= 10)
+    if (raised && ++g_budgetWrites <= 10)
         logf("texture budget: %.1f -> %.1f GB%s", old / 1073741824.0, g_budget / 1073741824.0,
              g_budgetWrites == 1 ? "" : " (re-asserted; the settings screen rewrote it)");
 }
@@ -1181,6 +1577,64 @@ static void costReport()
     }
 }
 
+// User-controlled files are intentionally read after DllMain returns. The hook itself still
+// installs synchronously before the game entry point, but a large folder, journal or XML can no
+// longer hold Windows' loader lock while FiveM is starting.
+static void loadPostStartupConfig()
+{
+    char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
+    FILE* bf = nullptr;
+    if (!fopen_s(&bf, bp, "rb") && bf) {
+        char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
+        double gb = atof(buf);
+        if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
+        else { g_budgetWant = 0.0; logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it"); }
+    }
+
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do { parsePlacementXml(std::string(g_overrideDir) + fd.cFileName, fd.cFileName, g_pl); } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    for (auto& pc : g_pl) logf("placement: collection %s — %zu preset(s) from %s", pc.name.c_str(), pc.presets.size(), pc.src.c_str());
+}
+
+// Optional runtime plumbing is discovered on the beat thread, outside Windows' loader lock.
+// This runs before the scan can publish READY, so the streaming manager is still available for
+// the very first base registration. Missing optional patterns degrade individual features only.
+static void locateRuntimePatterns()
+{
+    { const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
+      uint8_t* q = scanModule(PAT_VRAM, 13);
+      uint64_t* t = q ? (uint64_t*)ripTarget(q + 6) : nullptr;
+      if (t && vramTableSane(t, &g_budgetCurr)) g_vramTable = t;
+      else logf("budget: vram table %s — texture budget left alone, everything else still works",
+                q ? "failed the sanity check" : "pattern NOT FOUND"); }
+
+    const short PAT_MGR[] = { 0x74,0x1A,0x8B,0x15,-1,-1,-1,-1,0x48,0x8D,0x0D,-1,-1,-1,-1,0x41 };
+    if (uint8_t* q = scanModule(PAT_MGR, 16)) {
+        g_mgr = (StrMgr*)ripTarget(q + 11);
+        logf("streaming manager @ %p", (void*)g_mgr);
+    }
+    else logf("manager pattern NOT FOUND — claims still register, but nothing can re-assert them");
+
+    { const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
+      if (uint8_t* q = scanModule(PAT_GRS, 19)) { if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4); }
+      const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
+      if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
+      logf("live reload: rawStreamer=%s getEntry=%s",
+           g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING"); }
+}
+
+static void locateRuntimePatternsSafe()
+{
+    __try { locateRuntimePatterns(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_mgr = nullptr; g_vramTable = nullptr; g_getRawStreamerFn = nullptr; g_rawGetEntryFn = nullptr;
+        logf("FAULT while locating optional runtime features — reassertion, live refresh and budget changes disabled");
+    }
+}
+
 static void Setup()
 {
     char self[MAX_PATH]; GetModuleFileNameA(g_self, self, MAX_PATH);
@@ -1205,72 +1659,38 @@ static void Setup()
     { time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
       char d[32]; strftime(d, sizeof d, "%Y-%m-%d", &tm);
       logf("================ texoverride " TEXOVERRIDE_VERSION " loaded (%s) ================", d); }
-    crashSaverStartup();   // quarantine anything a crash left in the journal, before the scan
-    g_crashSaverRan = true;
-    // Only the directory walk happens here. It opens no files, so it stays cheap even on a huge
-    // pack, and the expensive part (one header read per file) is left to scanFinish on the beat
-    // thread. Setup() runs in front of the game's entry point: anything slow here is boot time.
+    // Install the existing main-thread pump before the game entry point runs. This removes the
+    // runtime IAT-patch race; h_peekMsg accepts only the entry-point thread captured in DllMain.
+    // Live application remains disabled if this optional shim fails.
+    if (!g_off) logf("main-thread pump pre-entry install: %s", installPump() ? "ok" : "MISSING");
     g_scanDone = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-    walkDir(std::string(g_overrideDir), "", g_cands);
-    logf("found %zu file(s); reading their headers in the background while the game starts", g_cands.size());
-    // ---- texture budget: find the table now, decide the number later -------------------------
-    // The DECISION cannot happen here. Setup() runs inside DllMain under the loader lock, and
-    // creating a DXGI factory there comes back empty (0.7.0 shipped with the probe here and every
-    // log said "cannot read this card's memory"). The old opt-in path had the same call and hid
-    // the same failure, because a zero there only skipped a clamp. Locating the table is just a
-    // module scan, so that stays; probeVram() and the sizing run on the beat thread, which cannot
-    // start until DllMain returns and the lock is gone. See decideBudget().
-    { const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
-      uint8_t* q = scanModule(PAT_VRAM, 13);
-      uint64_t* t = q ? (uint64_t*)ripTarget(q + 6) : nullptr;
-      if (t && vramTableSane(t, &g_budgetCurr)) g_vramTable = t;
-      else logf("budget: vram table %s — texture budget left alone, everything else still works",
-                q ? "failed the sanity check" : "pattern NOT FOUND");
-
-      char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
-      FILE* bf = nullptr;
-      if (!fopen_s(&bf, bp, "rb") && bf) {
-          char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
-          double gb = atof(buf);
-          if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
-          else { g_budgetWant = 0.0; logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it"); }
-      } }
-
-    // tattoo placement files: *.xml at the root of tex_overrides (edited overlays.xml copies)
-    { WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
-      if (h != INVALID_HANDLE_VALUE) {
-          do { parsePlacementXml(std::string(g_overrideDir) + fd.cFileName, fd.cFileName, g_pl); } while (FindNextFileA(h, &fd));
-          FindClose(h);
-      } }
-    for (auto& pc : g_pl) logf("placement: collection %s — %zu preset(s) from %s", pc.name.c_str(), pc.presets.size(), pc.src.c_str());
-
-    // rage::strStreamingEngine::ms_info, via the lea in Cfx's g_storeMgr pattern (Streaming.cpp)
-    const short PAT_MGR[] = { 0x74,0x1A,0x8B,0x15,-1,-1,-1,-1,0x48,0x8D,0x0D,-1,-1,-1,-1,0x41 };
-    if (uint8_t* q = scanModule(PAT_MGR, 16)) {
-        g_mgr = (StrMgr*)ripTarget(q + 11);
-        logf("streaming manager @ %p", (void*)g_mgr);
+    g_registerDone = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    if (!g_scanDone || !g_registerDone) {
+        g_off = true;
+        logf("could not create startup synchronization events (err %lu) — plugin disabled", GetLastError());
     }
-    else logf("manager pattern NOT FOUND — claims still register, but nothing can re-assert them");
-
-    // live-reload plumbing, both from Cfx's published patterns (LoadStreamingFile.cpp):
-    //   getRawStreamer          — the game's pgRawStreamer instance
-    //   pgRawStreamer::GetEntry — re-stats an entry when its timestamp is 0
-    { const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
-      if (uint8_t* q = scanModule(PAT_GRS, 19)) { if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4); }
-      const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
-      if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
-      logf("live reload: rawStreamer=%s getEntry=%s",
-           g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING"); }
-
     const short PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
     uint8_t* p = scanModule(PAT, sizeof PAT / sizeof *PAT);
-    if (!p) { logf("pattern NOT FOUND"); }
+    if (!p) { logf("pattern NOT FOUND — plugin disabled for this game build"); uninstallPump(); g_off = true; }
     else {
         void* target = (void*)(p - 0x25);
         logf("registerRawStreamingFile @ %p", target);
-        MH_STATUS s = MH_Initialize();                                    logf("MH_Initialize: %s", MH_StatusToString(s));
-        s = MH_CreateHook(target, (void*)&h_regRaw, (void**)&o_regRaw);   logf("MH_CreateHook: %s", MH_StatusToString(s));
-        s = MH_EnableHook(MH_ALL_HOOKS);                                  logf("MH_EnableHook: %s", MH_StatusToString(s));
+        MH_STATUS s = MH_Initialize(); logf("MH_Initialize: %s", MH_StatusToString(s));
+        bool ownMh = s == MH_OK;
+        if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) { uninstallPump(); g_off = true; return; }
+        s = MH_CreateHook(target, (void*)&h_regRaw, (void**)&o_regRaw); logf("MH_CreateHook: %s", MH_StatusToString(s));
+        if (s != MH_OK) {
+            if (ownMh) MH_Uninitialize();
+            uninstallPump();
+            g_off = true; return;
+        }
+        s = MH_EnableHook(target); logf("MH_EnableHook: %s", MH_StatusToString(s));
+        if (s != MH_OK) {
+            MH_STATUS rm = MH_RemoveHook(target); logf("MH_RemoveHook after enable failure: %s", MH_StatusToString(rm));
+            if (ownMh) MH_Uninitialize();
+            uninstallPump();
+            g_off = true; return;
+        }
         logf(g_off ? "hooked, disabled" : "LIVE — will register base overrides on first stream call");
     }
 }
@@ -1305,7 +1725,10 @@ static DWORD WINAPI UpdateCheck(LPVOID)
     if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0)
           && WinHttpReceiveResponse(r, nullptr)) {
         char buf[4096]; DWORD got = 0;
-        while (WinHttpReadData(r, buf, sizeof buf, &got) && got) body.append(buf, got);
+        while (WinHttpReadData(r, buf, sizeof buf, &got) && got) {
+            if (body.size() + got > (1u << 20)) { body.clear(); break; }
+            body.append(buf, got);
+        }
     }
     if (r) WinHttpCloseHandle(r);
     if (c) WinHttpCloseHandle(c);
@@ -1341,55 +1764,93 @@ static DWORD WINAPI UpdateCheck(LPVOID)
 
 // SEH so a fault in the scan cannot leave the hook waiting on an event nobody will ever set.
 // (Own function: SEH inside BeatLoop's infinite loop confuses MSVC's return analysis.)
+static bool scanFinishCppSafe()
+{
+    try { return scanFinish(); }
+    catch (const std::exception& e) { logf("file scan failed: %s", e.what()); }
+    catch (...) { logf("file scan failed with an unknown C++ exception"); }
+    return false;
+}
+
+static void uninstallPump()
+{
+    PVOID volatile* slot = g_peekSlot;
+    PeekMsg_t orig = (PeekMsg_t)InterlockedCompareExchangePointer((PVOID volatile*)&g_origPeek, nullptr, nullptr);
+    if (!slot || !orig) return;
+    DWORD old;
+    if (!VirtualProtect((void*)slot, sizeof(void*), PAGE_READWRITE, &old)) return;
+    InterlockedCompareExchangePointer(slot, (PVOID)orig, (PVOID)h_peekMsg);
+    VirtualProtect((void*)slot, sizeof(void*), old, &old);
+    g_peekSlot = nullptr;
+}
 static void scanFinishSafe()
 {
-    __try { scanFinish(); }
+    bool ok = false;
+    __try { ok = scanFinishCppSafe(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        logf("FAULT during the file scan (code %08X) — carrying on with whatever it had", GetExceptionCode());
+        logf("FAULT during the file scan (code %08X) — overrides disabled for this session", GetExceptionCode());
     }
-    if (g_scanDone) SetEvent(g_scanDone);
+    if (!ok) {
+        InterlockedCompareExchange(&g_scanState, SCAN_FAILED, SCAN_SCANNING);
+        if (g_scanDone) SetEvent(g_scanDone);
+    }
 }
 
 static DWORD WINAPI BeatLoop(LPVOID)
 {
-    decideBudget();   // first thing off the loader lock: DXGI only works out here
-    scanFinishSafe();   // the file reads, off the loader lock at last
+    crashSaverStartup();   // file I/O stays off the loader lock and precedes the pack scan
+    g_crashSaverRan = true;
+    if (g_off) {
+        InterlockedExchange(&g_scanState, SCAN_FAILED);
+        if (g_scanDone) SetEvent(g_scanDone);
+        logf("disabled; pack scan, watcher and budget changes skipped");
+        return 0;
+    }
+    locateRuntimePatternsSafe(); // optional scans run after DllMain but before READY is published
+    scanFinishSafe();      // publishes the registry and releases the streaming hook
+    loadPostStartupConfig();
+    decideBudget();        // DXGI is off the loader lock and no longer delays override readiness
+    int pumpMisses = 0;
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
             Sleep(1000);
             // once streaming is live, start the live-reload watcher — before that there is
             // nothing a change could apply to anyway
-            if (!g_watcherStarted && !g_off && g_idsReady) {
-                g_watcherStarted = true;
-                CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+            if (!g_watcherStarted && !g_off && atomicRead(&g_idsReady)) {
+                HANDLE wt = CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+                if (wt) { g_watcherStarted = true; CloseHandle(wt); }
+                else logf("live reload: watcher thread could not start (err %lu), retrying", GetLastError());
             }
-            // re-assert: DLC mounts and FiveM's loader re-point claimed slots after us; whoever
-            // writes the handle last wins, so write ours back. Same mechanism Cfx's own override
-            // path uses (LoadStreamingFile.cpp writes Entries[].handle directly).
-            // Lock held: the watcher can append to g_ovs (vector may reallocate) and swap g_pl
-            // entries under us.
-            if (!g_off && g_idsReady && g_mgr && g_mgr->entries) {
-                EnterCriticalSection(&g_cs);
-                for (auto& ov : g_ovs) {
-                    if (!ov.handle || ov.id >= (uint32_t)g_mgr->numEntries) continue;
-                    StrEntry& e = g_mgr->entries[ov.id];
-                    if (e.handle == ov.handle) continue;
-                    if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
-                    uint32_t old = e.handle;
-                    e.handle = ov.handle;
-                    if (++g_reclaims <= 60) logf("RECLAIM  %s  (%08x -> %08x)", ov.slot, old, ov.handle);
+            // Re-assert one complete pass per second. The main-thread PeekMessageW pump consumes
+            // it in bounded shards, avoiding a thousand-entry background write burst.
+            if (!g_off && atomicRead(&g_idsReady) && g_mgr && g_mgr->entries) {
+                LONGLONG lastPump = InterlockedCompareExchange64(&g_lastPumpAt, 0, 0);
+                bool pumpInstalled = InterlockedCompareExchangePointer((PVOID volatile*)&g_origPeek, nullptr, nullptr) != nullptr;
+                bool pumpHealthy = pumpInstalled && lastPump &&
+                                   (LONGLONG)GetTickCount64() - lastPump <= 5000;
+                if (pumpHealthy) {
+                    pumpMisses = 0;
+                    if (InterlockedExchange(&g_pumpUnavailable, 0))
+                        logf("re-assert: main-thread pump resumed");
+                    if (!atomicRead(&g_reassertFault)) InterlockedExchange(&g_reassertPending, 1);
                 }
-                LeaveCriticalSection(&g_cs);
+                // A slow loading screen can legitimately run for a long time before the first
+                // PeekMessageW. Only judge liveness after this process has observed the pump.
+                else if (lastPump && ++pumpMisses >= 5 && InterlockedCompareExchange(&g_pumpUnavailable, 1, 0) == 0) {
+                    InterlockedExchange(&g_reassertPending, 0);
+                    logf("re-assert: main-thread pump paused; reassertion will resume automatically when it returns");
+                }
+                else if (!lastPump) pumpMisses = 0;
             }
             if (!g_off) {
-                EnterCriticalSection(&g_cs);
-                placementBeatSafe();   // apply/re-assert tattoo placement edits
-                LeaveCriticalSection(&g_cs);
+                { CsGuard lock(g_cs); placementBeatSafe(); }   // apply/re-assert tattoo placement edits
                 budgetBeat();          // re-assert the raised texture budget (aligned data writes)
             }
         }
         logf("alive (beat %d) — reg=%ld redirects=%ld reclaims=%ld deferred=%ld baseRegistered=%s",
-             beat, (long)g_regTotal, (long)g_redirects, g_reclaims, g_deferred, g_didRegister ? "yes" : "no");
+             beat, atomicRead(&g_regTotal), atomicRead(&g_redirects),
+            atomicRead(&g_reclaims), atomicRead(&g_deferred),
+             atomicRead(&g_registrationState) == REG_DONE ? "yes" : "no");
     }
 }
 
@@ -1412,10 +1873,18 @@ static bool SetupSafe()
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
-        g_self = h; DisableThreadLibraryCalls(h);
+        g_self = h; g_gameTid = GetCurrentThreadId(); DisableThreadLibraryCalls(h);
         if (SetupSafe()) {   // synchronous: must finish before the game's entry point runs (see Setup)
-            CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
-            CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+            HANDLE beat = CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
+            if (beat) CloseHandle(beat);
+            else {
+                g_off = true;
+                InterlockedExchange(&g_scanState, SCAN_FAILED);
+                if (g_scanDone) SetEvent(g_scanDone);
+                logf("beat thread could not start (err %lu) — plugin disabled", GetLastError());
+            }
+            HANDLE update = CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+            if (update) CloseHandle(update);
         }
     }
     else if (reason == DLL_PROCESS_DETACH) {

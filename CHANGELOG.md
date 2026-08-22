@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.3-emk.1 (2026-08-22)
+
+- Forked from upstream 0.7.3 for smoother large-pack use on FiveM. The hook still installs in the
+  original safe pre-entry window, while directory walking, crash-journal reads and placement XML
+  parsing now run after Windows releases the loader lock.
+- The first streaming call waits at most 15 seconds for an all-or-nothing scan. A failed or stuck
+  scan now leaves FiveM running without overrides instead of freezing for five minutes or
+  permanently registering an empty pack.
+- Invalid, truncated and unreadable `.ydd` or `.ytd` resources are rejected before GTA parses
+  them. Each file is revalidated under a read-only lease at the game call that consumes it, and
+  directory junctions and symbolic links are not followed.
+- Handle reassertion uses the pre-entry game-thread pump in 64-entry shards. Reassertion fails
+  closed on an engine-memory fault, pauses while the verified pump is unavailable, and resumes
+  automatically when the pump returns after a long loading screen.
+- Live additions and queued game operations are limited to eight operations in a shared 10 ms pump window.
+  Pending changes coalesce by slot and the queue has a hard cap instead of growing without bound.
+- Live deletion stops redirecting and reasserting the missing path, then asks for a restart to
+  restore the server or vanilla asset safely.
+- If an active file is overwritten with malformed or over-limit data, local routing is disabled
+  and the exact file is recoverably renamed with a `.texoverride-rejected-*` suffix. This keeps a
+  stale raw-streaming handle from consuming bytes that failed validation.
+- Validated active YDD/YTD files now retain a read-only process-lifetime lease. Windows therefore
+  refuses overwrite, rename and deletion attempts until FiveM closes, eliminating the remaining
+  validation/use race. Placement XML and brand-new safe resource names can still update live.
+- The texture-budget helper is now strictly raise-only. It never lowers a larger value selected
+  later by FiveM or the player.
+- Logging keeps one synchronized, flushed file handle rather than reopening the log for every
+  line. DXGI and detached thread handles are released correctly, update responses are capped,
+  and builds use `/Brepro` for reproducible binaries.
+- The measured local scan is kept sequential on the background beat thread. This removes helper
+  thread lifetime and infinite-join failure modes while retaining sub-second scan time for the
+  1,098-file balanced pack. Optional runtime-pattern discovery also runs outside the loader lock.
+- Placement XML input is capped at 16 MB and 65,535 presets. Non-finite, extreme or malformed numeric
+  fields are rejected before any game-memory write.
+
 ## 0.7.3 (2026-08-21)
 
 - Big packs no longer hold the game on the loading screen. Before it can start, the plugin has to
