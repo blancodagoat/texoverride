@@ -239,8 +239,12 @@ crashed, the log from the crashed session is still there.
 | `registerRawStreamingFile @ ...` | Internal: found the function it works through |
 | `MH_EnableHook: MH_OK` | Internal: ready |
 | `OVERRIDE-REG slot <- file` | Your file took over that item |
+| `OVERRIDE-TAKEOVER slot <- file` | The item was already mounted, so the plugin attached your local file to its existing slot |
+| `OVERRIDE-WAIT slot <- file` | Your file is ready; its server collection has not appeared yet and will be attached when it does |
+| `OVERRIDE-FAILED slot <- file` | The game did not accept the file and no usable raw entry was available |
 | `RECLAIM slot (old -> ours)` | The game tried to take an item back; the plugin re-took it |
 | `REDIRECT name -> file` | A server file was swapped for yours |
+| `REDIRECT-FAILED name -> file` | A server-file swap was attempted but the game rejected it |
 | `PLACEMENT ...` | A tattoo position change was applied |
 | `collection: name [tag]` | A collection the server uses, and whether it is reachable |
 | `update check: ...` | Whether you have the newest version |
@@ -262,7 +266,13 @@ sessions.
 
 Base freemode clothing lives inside `x64v.rpf` and never passes through that function, so waiting
 to intercept it would wait forever. Instead the plugin calls `registerRawStreamingFile` itself and
-registers your loose file under the base slot name. That claim alone is not enough: a streaming
+registers your loose file under the base slot name. If that name already owns a handle, the normal
+call returns `-1`; the loose file has still been added to the game's raw streamer, so the plugin
+resolves the existing target slot and attaches that raw handle directly. This mirrors the occupied-
+slot branch in FiveM's own `LoadStreamingFile.cpp` and removes the startup-order race where the log
+could say everything registered even though every returned ID was `4294967295`.
+
+That initial claim alone is not enough: a streaming
 slot maps name → id → handle, and whoever writes the handle last owns the slot. Vanilla DLC mounts
 re-point claimed slots when they load, and FiveM's loader overwrites handles of already-registered
 slots directly, without calling the hooked function at all. So the plugin remembers the handle its

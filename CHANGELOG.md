@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Fixed a startup-order bug that could leave every override inactive while the log still claimed
+  they had all registered. If FiveM, a DLC, or the server already owns a clothing slot when the
+  plugin reaches it, the game rejects a second normal registration. The plugin now keeps the raw
+  handle created by that attempt and attaches it to the existing slot, following FiveM's own
+  occupied-slot path.
+- Registration and redirect totals now count confirmed results. Failed calls are reported as
+  `OVERRIDE-FAILED` or `REDIRECT-FAILED` instead of being presented as working overrides.
+- A raw file whose server collection does not exist yet is kept as `OVERRIDE-WAIT` and attached
+  automatically when the target slot appears.
+
 ## 0.7.3 (2026-08-21)
 
 - Big packs no longer hold the game on the loading screen. Before it can start, the plugin has to
