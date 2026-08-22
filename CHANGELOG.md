@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 (2026-08-21)
+## 0.8.0 (2026-08-22)
 
 - Animals work now. Eight of them are built the same way your own character is, out of a folder of
   parts: chop, husky, mtlion, panther, retriever, rottweiler, sharktiger and shepherd. Most dog
