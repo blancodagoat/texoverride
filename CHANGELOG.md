@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Builds now use MSVC's reproducible-output mode, and CI rebuilds the plugin and compares SHA-256
+  hashes before publishing an artifact.
+
 ## 0.8.4 (2026-08-22)
 
 - Animal `.ymt` files are now handed to the game later, about a minute after you start, instead

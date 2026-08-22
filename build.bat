@@ -22,7 +22,7 @@ REM /MT so it does not need the VC runtime DLLs in FiveM's directory.
 REM /EHsc for std::string/std::vector. No /clr — a managed DLL is refused outright by asi-five.
 cl /nologo /std:c++17 /O2 /MT /EHsc /DNDEBUG /LD /I minhook\include ^
    dllmain.cpp minhook\src\buffer.c minhook\src\hook.c minhook\src\trampoline.c minhook\src\hde\hde64.c ^
-   texoverride.res /Fe:texoverride.asi /link /DLL user32.lib || exit /b 1
+   texoverride.res /Fe:texoverride.asi /link /DLL user32.lib /Brepro || exit /b 1
 
 del /q *.obj *.res *.exp *.lib 2>nul
 echo.
