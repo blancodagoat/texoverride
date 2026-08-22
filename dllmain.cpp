@@ -37,6 +37,7 @@
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 #include <string>
+#include <set>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -198,7 +199,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.8.4"
+#define TEXOVERRIDE_VERSION "0.8.5"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -228,6 +229,55 @@ static bool isPedCollection(const std::string& coll)
     std::string c = lower(coll);
     return c.rfind("mp_m_freemode_01", 0) == 0 || c.rfind("mp_f_freemode_01", 0) == 0
         || c.rfind("a_c_", 0) == 0;
+}
+
+// Servers ship their own peds and name the collection whatever the author felt like: canine,
+// caninesd, caninefd, blackcat, browncat on one real server, none of which any prefix rule could
+// guess. So the folder name is no longer what decides. The FILE name is, and it is the better
+// test anyway: ped parts are named from a closed vocabulary that Rockstar has used since launch,
+// twelve component slots and eleven prop anchors, always followed by a three digit number. A
+// vehicle txd, a prop drawable, a map file, none of them look like this, so they still cannot get
+// in no matter what folder somebody puts them in. That is the guarantee the folder whitelist was
+// really buying, kept, while server peds stop being collateral damage.
+// The promise the README makes is that story and cutscene characters are never touched, and that
+// survives the change above: these are the prefixes every collection-based non-freemode ped in
+// b3751 uses (147 cs_, 69 ig_, plus the stragglers), read out of docs/ped_collections.tsv. They
+// are refused by name whatever their files are called. Ambient peds (s_m_*, a_f_* and friends)
+// need no entry: the scan found none of them are collection-based, so there is no slot to take.
+static bool isBlockedCollection(const std::string& coll)
+{
+    static const char* kBlocked[] = {
+        "cs_", "csb_", "ig_", "hc_", "player_", "p_michael", "p_franklin", "mp_headtargets",
+        "mp_m_", "mp_f_", "mp_s_",          // any mp_ ped that is not freemode_01, checked after it
+        "s_m_", "s_f_", "a_m_", "a_f_", "u_m_", "u_f_", "g_m_", "g_f_",
+    };
+    std::string c = lower(coll);
+    for (const char* b : kBlocked) if (c.rfind(b, 0) == 0) return true;
+    return false;
+}
+static bool isPedComponentFile(const std::string& file)
+{
+    static const char* kComp[] = { "head", "berd", "hair", "uppr", "lowr", "hand",
+                                   "feet", "teef", "accs", "task", "decl", "jbib" };
+    static const char* kAnchor[] = { "head", "eyes", "ears", "mouth", "lhand", "rhand",
+                                     "lwrist", "rwrist", "hip", "lfoot", "rfoot" };
+    std::string f = lower(file);
+    size_t at = std::string::npos;
+    if (f.rfind("p_", 0) == 0) {                       // a prop: p_<anchor>_...
+        for (const char* a : kAnchor) {
+            std::string pre = std::string("p_") + a + "_";
+            if (f.rfind(pre, 0) == 0) { at = pre.size(); break; }
+        }
+    } else {
+        for (const char* c : kComp) {
+            std::string pre = std::string(c) + "_";
+            if (f.rfind(pre, 0) == 0) { at = pre.size(); break; }
+        }
+    }
+    if (at == std::string::npos) return false;
+    if (f.compare(at, 5, "diff_") == 0) at += 5;       // <comp>_diff_<nnn>_<letter>_<race>.ytd
+    return f.size() >= at + 3 && isdigit((unsigned char)f[at])
+        && isdigit((unsigned char)f[at+1]) && isdigit((unsigned char)f[at+2]);
 }
 static std::string collectionOf(const std::string& key)   // "collection/file" -> "collection"
 {
@@ -260,20 +310,52 @@ static bool isOverrideExt(const std::string& ln)
 // on top of vanilla selectable at all. So those three types are allowed at the root, for a_c_
 // names only. One player's .ymt took the game down at registration on 0.8.0; that is now the
 // startup crash saver's job to contain rather than a reason to refuse the whole type.
+// A .ymt registers cleanly when its name is one the game has never seen: a connected server does
+// exactly that a dozen times a session for its own clothing packs, through this same call, with
+// no trouble at all. Hand the call a .ymt name the game ALREADY owns and it faults three frames
+// in and takes the game with it (ink-island-iowa, GTA5_b3751.exe+16765E0). The .yft beside it
+// survives the same treatment because a fragment and a metadata file land in different stores,
+// and only the metadata store dies this way.
+//
+// Every animal ships its own .ymt, checked against b3751 with CodeWalker (docs/ped_collections.tsv),
+// so a user's animal .ymt always collides and can never win. Timing does not rescue it either:
+// 0.8.4 handed them over a minute into the session instead and it died just the same. These eight
+// names are refused. Every other .ymt name is allowed, which is what a clothing pack needs.
+static bool isVanillaAnimalYmt(const std::string& key)
+{
+    static const char* kVanilla[] = {
+        "a_c_chop.ymt", "a_c_husky.ymt", "a_c_mtlion.ymt", "a_c_panther.ymt",
+        "a_c_retriever.ymt", "a_c_rottweiler.ymt", "a_c_sharktiger.ymt", "a_c_shepherd.ymt",
+    };
+    std::string k = lower(key);
+    for (const char* v : kVanilla) if (k == v) return true;
+    return false;
+}
 static bool isAllowedKey(const std::string& key)
 {
     size_t s = key.find('/');
-    if (s != std::string::npos)
-        return isPedCollection(key.substr(0, s)) && (hasExt(key, ".ydd") || hasExt(key, ".ytd"));
+    if (s != std::string::npos) {
+        if (!hasExt(key, ".ydd") && !hasExt(key, ".ytd")) return false;
+        std::string coll = key.substr(0, s);
+        // the two known families keep working exactly as they did, odd filenames included
+        if (isPedCollection(coll)) return true;
+        if (isBlockedCollection(coll)) return false;
+        return isPedComponentFile(key.substr(s + 1));
+    }
     if (hasExt(key, ".ytd")) return true;
+    if (hasExt(key, ".ymt")) return !isVanillaAnimalYmt(key);
     return lower(key).rfind("a_c_", 0) == 0
-        && (hasExt(key, ".ydd") || hasExt(key, ".yft") || hasExt(key, ".ymt"));
+        && (hasExt(key, ".ydd") || hasExt(key, ".yft"));
 }
 
 // Types we walk past on purpose. Announcing beats a silent skip: a .meta is a file mods really do
 // ship, so a user who sees nothing assumes the plugin broke.
 static bool isIgnoredType(const std::string& ln, const std::string& rel, bool announce)
 {
+    if (rel.find('/') == std::string::npos && isVanillaAnimalYmt(ln)) {
+        if (announce) logf("IGNORED %s - the game already owns that exact name and will not hand a .ymt over; the call that would replace it crashes the game outright. Every animal ships one, so this can never work. The rest of the mod still loads, and only parts it ADDED on top of the original animal stay unselectable.", rel.c_str());
+        return true;
+    }
     if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
         if (announce) logf("IGNORED %s - .meta files hold shop data (prices/menus), not looks; see README", rel.c_str());
         return true;
@@ -299,7 +381,7 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
         // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
         if (!isAllowedKey(slotStr)) {
-            logf("SKIP %s - that folder is not a collection this game has. Ped parts are keyed by collection name, so a folder GTA V does not ship (an add-on ped from a RAGE MP or singleplayer pack, for example) has no slot to take over. Folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", slotStr.c_str());
+            logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ymt, or .ydd/.yft named a_c_*", slotStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
@@ -627,7 +709,6 @@ typedef uint8_t* (*RawGetEntry_t)(void*, uint16_t);   // pgRawStreamer::GetEntry
 static GetRawStreamer_t g_getRawStreamerFn = nullptr;
 static RawGetEntry_t    g_rawGetEntryFn = nullptr;
 static bool g_watcherStarted = false;
-static bool g_lateDone = false;        // the held-back .ymt batch is submitted once
 
 struct LiveOp { int kind; Ov ov; uint32_t handle; };            // kind: 0 = register, 1 = re-stat
 static std::vector<LiveOp> g_opQ;                               // guarded by g_cs
@@ -707,23 +788,6 @@ static void drainOps()   // runs on the game's main thread
                      why == 2 ? "no handle came back" : "fault inside the game's register call");
                 free((void*)op.ov.slot); free((void*)op.ov.file);
             }
-        } else if (op.kind == 2) {
-            // deliberately held back from the startup loop (see there). The Ov here is a copy:
-            // register through it, then carry the result onto the real entry.
-            int why = liveRegister(op.ov);
-            if (why == 0) {
-                EnterCriticalSection(&g_cs);
-                for (auto& ov : g_ovs)
-                    if (strcmp(ov.slot, op.ov.slot) == 0) { ov.id = op.ov.id; ov.handle = op.ov.handle; break; }
-                LeaveCriticalSection(&g_cs);
-                logf("LATE-REG  %s  (id=%u handle=%08x)", op.ov.slot, op.ov.id, op.ov.handle);
-            } else {
-                logf("LATE-REG  %s did not take (%s); anything the mod ADDED on top of the original stays unselectable this session", op.ov.slot,
-                     why == 1 ? "the game already has that name loaded" :
-                     why == 2 ? "no handle came back" : "fault inside the game's register call");
-            }
-            free((void*)op.ov.slot); free((void*)op.ov.file);
-            if (op.ov.gfile && op.ov.gfile != op.ov.file) free((void*)op.ov.gfile);
         } else {
             if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
                 logf("LIVE-UPDATE  %s reread from disk; reapply the outfit or tattoo to see it", op.ov.slot);
@@ -880,7 +944,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         std::string key = lower(fwd(childRel));
         if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
         if (!isAllowedKey(key)) {
-            if (isNew && !quiet) logf("SKIP %s - that folder is not a collection this game has. Ped parts are keyed by collection name, so a folder GTA V does not ship (an add-on ped from a RAGE MP or singleplayer pack, for example) has no slot to take over. Folders must be a freemode or a_c_ ped collection; loose files must be .ytd, or .ydd/.yft/.ymt named a_c_*", key.c_str());
+            if (isNew && !quiet) logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ymt, or .ydd/.yft named a_c_*", key.c_str());
             continue;
         }
 
@@ -1010,18 +1074,9 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                 logf("streaming pool looks wrong (entries=%p num=%d) — re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
                 g_mgr = nullptr;
             }
-            int done = 0, held = 0;
+            int done = 0;
             for (auto& ov : g_ovs)
             {
-                // A ped .ymt is the one type known to fault INSIDE the game's own register call
-                // (ink-island-iowa, 0.8.0). Everything else in this loop, the .yft beside it
-                // included, goes through fine. The one difference we can act on is timing: this
-                // runs on the first stream call, seconds in and well before the session exists,
-                // and the metadata store a .ymt needs is the last of the stores to come up.
-                // So hand these to the game later, on its own thread, the way Cfx does all of
-                // its mid-session registration. Unproven, but survivable: the batch is journaled,
-                // so if it still faults the next launch quarantines that one file and boots.
-                if (hasExt(ov.slot, ".ymt")) { ++held; continue; }
                 uint32_t id = 0xFFFFFFFF;
                 // named in _inflight.txt for the duration of the call; if the game dies in
                 // there, the next launch quarantines this key and boots without it
@@ -1036,7 +1091,6 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             InterlockedExchange(&g_journalHot, 0);
             DeleteFileA(g_inflightPath);   // whole loop survived; nothing to quarantine
             logf("registered %d base-slot override(s)", done);
-            if (held) logf("holding %d .ymt file(s) back until the game is running; they are handed over on the game's own thread a little later", held);
             if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
             InterlockedExchange(&g_idsReady, 1);
         }
@@ -1322,7 +1376,6 @@ static void Setup()
       g_off = (GetFileAttributesA(off.c_str()) != INVALID_FILE_ATTRIBUTES); }
     _snprintf_s(g_inflightPath,   MAX_PATH, _TRUNCATE, "%s_inflight.txt",   g_overrideDir);
     _snprintf_s(g_quarantinePath, MAX_PATH, _TRUNCATE, "%s_quarantine.txt", g_overrideDir);
-
     InitializeCriticalSection(&g_cs);   // must exist before the hook can fire
 
     // fresh log every launch, but keep one previous generation: after a crash the next launch
@@ -1510,32 +1563,6 @@ static DWORD WINAPI BeatLoop(LPVOID)
                     if (++g_reclaims <= 60) logf("RECLAIM  %s  (%08x -> %08x)", ov.slot, old, ov.handle);
                 }
                 LeaveCriticalSection(&g_cs);
-            }
-            // the .ymt files the startup loop held back. Wait for the pump (that is the game's
-            // own thread) and give the session 30s to finish coming up, which is the whole point
-            // of holding them: they go over late, once every store is built. Once only.
-            if (!g_off && g_idsReady && !g_origPeek && !g_lateDone && beat >= 3) {
-                g_lateDone = true;   // no game-thread pump: say so rather than hold them forever
-                int n = 0;
-                EnterCriticalSection(&g_cs);
-                for (auto& ov : g_ovs) if (ov.id == 0xFFFFFFFF && hasExt(ov.slot, ".ymt")) ++n;
-                LeaveCriticalSection(&g_cs);
-                if (n) logf("%d .ymt file(s) cannot be handed over: no game-thread pump this session, so they are not applied. Everything else still works.", n);
-            }
-            if (!g_off && g_idsReady && g_origPeek && !g_lateDone && beat >= 3) {
-                g_lateDone = true;
-                std::vector<LiveOp> late;
-                EnterCriticalSection(&g_cs);
-                for (auto& ov : g_ovs) {
-                    if (ov.id != 0xFFFFFFFF || !hasExt(ov.slot, ".ymt")) continue;
-                    const char* f = _strdup(ov.file);
-                    late.push_back({ 2, { _strdup(ov.slot), f, toUtf8(f) }, 0 });
-                }
-                LeaveCriticalSection(&g_cs);
-                if (!late.empty()) {
-                    logf("handing %d held-back .ymt file(s) to the game now", (int)late.size());
-                    submitBatch(late);
-                }
             }
             if (!g_off) {
                 EnterCriticalSection(&g_cs);

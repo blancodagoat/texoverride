@@ -35,27 +35,28 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
 
 ## Safety gates (do not weaken without asking)
 
-- Clothing folders: only `mp_m_freemode_01*` / `mp_f_freemode_01*` collections. Everything else
-  (animals, story peds, vehicles, props, maps, scripts) is refused at load and skipped at runtime.
-  This is what stops a "dog head on a human" mistake.
+- **The folder-name whitelist is GONE as of 0.8.5** (user call, 2026-08-22, after a server dog
+  named `caninesd` was refused). A slotted key now passes if the collection is freemode/`a_c_` OR
+  the FILE is named like a ped part (`isPedComponentFile`: 12 component slots, 11 prop anchors,
+  then 3 digits). That is what actually stops a vehicle txd or map file landing on a ped, which is
+  what the folder list was really buying. Story/cutscene peds stay refused by prefix
+  (`isBlockedCollection`: cs_ csb_ ig_ hc_ player_ non-freemode mp_ ...), so the README promise
+  holds. Server peds seen in the field: canine, caninepd, caninesd, caninefd, blackcat, browncat.
 - Root files: `.ytd` only, exact-name. Placement `.xml`: fingerprint match required (below).
 - The safety gate exists because filename-alone matching would cross-wire unrelated items. Keep it.
-- **`.ymt` stays ALLOWED for a_c_ names. Do not refuse the type again.** A player on 0.8.0
-  crashed with `ink-island-iowa` at `GTA5_b3751.exe+16765E0`, three frames inside
-  `registerRawStreamingFile`, on the call right after the `.yft` beside it registered fine, so the
-  faulting call was `a_c_shepherd.ymt`. Refusing the type was tried and REVERSED by the user
-  2026-08-22: a ped `.ymt` is a `CPedVariationInfo` and it is the only thing that makes drawables
-  or textures a mod ADDS on top of vanilla selectable, so dropping it guts animal mods. 0.8.1
-  contains the crash instead of preventing it (startup crash saver, below).
-  Mechanism still NOT established. Two dead ends recorded so nobody redoes them: a WebFetch
-  summary claiming "no streaming module for .ymt" INVENTED its quotes (the real
-  `LoadStreamingFile.cpp` says `ymt` zero times, and FiveM add-on peds ship `.ymt` in `stream/`
-  routinely). The real difference from Cfx is that it never calls the function blind (~line 1884):
-  `FindSlot`, then `FindSlotFromHashKey`, and `RegisterRawStreamingFile` ONLY when
-  `Entries[id].handle == 0`, overwriting the handle otherwise. Copying that needs `FindSlot`'s
-  absolute vtable index, which is on this file's do-not-re-derive list, AND the overwrite branch
-  needs a `pgRawStreamer::RegisterFile` pattern we do not have. That is why it is contained, not
-  fixed. Cheapest way to settle it: one `a_c_shepherd.ymt` alone in `tex_overrides`, nothing else.
+- **`.ymt`: refused for the 8 vanilla animal names, allowed for everything else** (0.8.5).
+  SETTLED, do not reopen. The mechanism is finally known: a `.ymt` whose name the game has NEVER
+  seen registers fine (a live server pushes ~12 of its own clothing-pack `.ymt`s through the same
+  call every session, logged as `collection: ... .ymt`), while a `.ymt` whose name the game ALREADY
+  owns faults three frames inside `registerRawStreamingFile` (ink-island-iowa,
+  `GTA5_b3751.exe+16765E0`). The `.yft` beside it survives because a fragment and a metadata file
+  land in different stores, and only the metadata store dies this way. All 8 animals ship a vanilla
+  `.ymt` (verified, docs/ped_collections.tsv), so an animal `.ymt` always collides and can never
+  win. Timing does not save it: 0.8.4 deferred them to the main-thread pump a minute into the
+  session and it still crashed, and that deferral was reverted in 0.8.5.
+  Dead ends, do not redo: a WebFetch summary claiming "no streaming module for .ymt" INVENTED its
+  quotes; Cfx's `GetStreamingIndexForName`/`GetStreamingIndexForLocalHashKey` exports only know
+  names FiveM itself registered, so they cannot answer "does the game own this slot".
 
 ## How the hook works
 

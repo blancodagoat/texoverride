@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.5 (2026-08-22)
+
+- Characters and animals your server added itself work now. Before this, the plugin only accepted
+  folders whose names came with the game, so a dog your server put in as `caninesd` was refused
+  before anything was even read. The folder name is no longer what decides. What decides is whether
+  the files inside are named the way GTA names body parts, like `head_000_r.ydd` or
+  `uppr_diff_001_a_uni.ytd`. Name the folder after the model and it works.
+- Nothing unsafe got easier. A vehicle texture, a prop or a map file is still refused whatever
+  folder you put it in, because none of them are named like body parts. That was the real job the
+  old folder list was doing. Story and cutscene characters are still refused by name.
+- Animal `.ymt` files are refused now, and the log explains why. The game already owns those names
+  and will not hand one over: the call that would replace it crashes the game outright, which is
+  what a few people had been running into. Every animal ships one, so this can never work. The rest
+  of an animal mod still loads. Only the parts a mod ADDED on top of the original stay unpickable.
+- Every other `.ymt` name is accepted, which is what a clothing pack needs and what was blocked
+  before for no good reason.
+
 ## 0.8.4 (2026-08-22)
 
 - Animal `.ymt` files are now handed to the game later, about a minute after you start, instead
