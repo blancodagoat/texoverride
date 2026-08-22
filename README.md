@@ -286,6 +286,10 @@ crashed, the log from the crashed session is still there.
 | `registerRawStreamingFile @ ...` | Internal: found the function it works through |
 | `MH_EnableHook: MH_OK` | Internal: ready |
 | `OVERRIDE-REG slot <- file` | Your file took over that item |
+| `OVERRIDE-TAKEOVER slot <- file` | The slot already existed, so its handle was replaced with the local raw handle |
+| `OVERRIDE-WAIT slot <- file` | The local file is ready and will bind when its target slot appears |
+| `OVERRIDE-FAILED slot <- file` | Registration failed and produced no usable local raw entry |
+| `LATE-BIND slot ...` | A previously missing target appeared and was attached |
 | `RECLAIM slot (old -> ours)` | The game tried to take an item back; the plugin re-took it |
 | `REDIRECT name -> file` | A server file was swapped for yours |
 | `PLACEMENT ...` | A tattoo position change was applied |
@@ -309,7 +313,12 @@ sessions.
 
 Base freemode clothing lives inside `x64v.rpf` and never passes through that function, so waiting
 to intercept it would wait forever. Instead the plugin calls `registerRawStreamingFile` itself and
-registers your loose file under the base slot name. That claim alone is not enough: a streaming
+registers your loose file under the base slot name. If the game rejects that call because the slot
+already owns a handle, the plugin locates the slot through its actual streaming module and attaches
+the local pgRawStreamer handle directly, matching FiveM's occupied-slot mechanism. It does not use
+FiveM's diagnostic name map because that map omits base-RPF names.
+
+That claim alone is not enough: a streaming
 slot maps name → id → handle, and whoever writes the handle last owns the slot. Vanilla DLC mounts
 re-point claimed slots when they load, and FiveM's loader overwrites handles of already-registered
 slots directly, without calling the hooked function at all. So the plugin remembers the handle its

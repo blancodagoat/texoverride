@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A normal registration rejected because its target slot is already occupied can now reuse the
+  local pgRawStreamer entry and attach it to the slot returned by the game's real streaming
+  module. Targets that have not appeared yet are retained and bound by the heartbeat later.
+- Startup totals and per-file lines distinguish direct registrations, occupied-slot takeovers,
+  waiting targets and genuine failures.
+
 ## 0.8.4 (2026-08-22)
 
 - Animal `.ymt` files are now handed to the game later, about a minute after you start, instead
