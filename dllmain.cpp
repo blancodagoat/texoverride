@@ -38,6 +38,7 @@
 #pragma comment(lib, "shell32.lib")
 #include <string>
 #include <set>
+#include <deque>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -199,7 +200,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.8.5"
+#define TEXOVERRIDE_VERSION "0.8.6"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -711,7 +712,14 @@ static RawGetEntry_t    g_rawGetEntryFn = nullptr;
 static bool g_watcherStarted = false;
 
 struct LiveOp { int kind; Ov ov; uint32_t handle; };            // kind: 0 = register, 1 = re-stat
-static std::vector<LiveOp> g_opQ;                               // guarded by g_cs
+// every call site freed slot and file and forgot gfile, which 0.8.3 added beside them
+static void freeLiveOp(LiveOp& op)
+{
+    free((void*)op.ov.slot); free((void*)op.ov.file);
+    if (op.ov.gfile && op.ov.gfile != op.ov.file) free((void*)op.ov.gfile);
+    op.ov.slot = op.ov.file = op.ov.gfile = nullptr;
+}
+static std::deque<LiveOp> g_opQ;                                // guarded by g_cs
 static volatile LONG g_opsPending = 0;                          // batch queued, not yet drained
 static ULONGLONG g_journalClearAt = 0;                          // watcher thread only
 
@@ -759,7 +767,11 @@ static DWORD g_pumpTid = 0;
 static void drainOps()   // runs on the game's main thread
 {
     EnterCriticalSection(&g_cs);
-    std::vector<LiveOp> ops; ops.swap(g_opQ);
+    // A folder copy can queue hundreds at once. Take a small bounded shard: PeekMessageW runs
+    // every frame, so the rest lands on the next few instead of one giant stall on the game
+    // thread that a player experiences as a freeze.
+    std::vector<LiveOp> ops;
+    for (int i = 0; i < 8 && !g_opQ.empty(); ++i) { ops.push_back(g_opQ.front()); g_opQ.pop_front(); }
     LeaveCriticalSection(&g_cs);
     for (auto& op : ops) {
         if (op.kind == 0) {
@@ -782,11 +794,11 @@ static void drainOps()   // runs on the game's main thread
                 // honest answer. Only brand-new NAMES are affected: editing a file the plugin
                 // already owns goes down the re-stat path and still applies live.
                 logf("live reload: %s is already loaded from the server or a DLC, and the game will not hand a name over while it runs. Restart FiveM and the plugin claims it at startup, before those mount. Editing files it already owns still applies live.", op.ov.slot);
-                free((void*)op.ov.slot); free((void*)op.ov.file);
+                freeLiveOp(op);
             } else {
                 logf("live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
                      why == 2 ? "no handle came back" : "fault inside the game's register call");
-                free((void*)op.ov.slot); free((void*)op.ov.file);
+                freeLiveOp(op);
             }
         } else {
             if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
@@ -796,7 +808,9 @@ static void drainOps()   // runs on the game's main thread
             free((void*)op.ov.slot);
         }
     }
-    InterlockedExchange(&g_opsPending, 0);
+    EnterCriticalSection(&g_cs);
+    if (g_opQ.empty()) InterlockedExchange(&g_opsPending, 0);   // more shards may still be waiting
+    LeaveCriticalSection(&g_cs);
 }
 
 static BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
@@ -836,11 +850,18 @@ static bool installPump()
 }
 
 // ---- crash saver ----
-static void journalWrite(const std::vector<LiveOp>& batch)
+// APPEND, not overwrite. This opened with "w", so a second batch queued while the first was
+// still inside its 30 second window wiped the first batch out of the journal, and a crash
+// then quarantined the wrong file or none at all. A journal that cannot be written now
+// refuses the batch: it is the only thing making a bad file cost one launch, not every one.
+static bool journalWrite(const std::vector<LiveOp>& batch)
 {
-    FILE* f; if (fopen_s(&f, g_inflightPath, "w") != 0 || !f) return;
-    for (auto& op : batch) fprintf(f, "%s\n", op.ov.slot);
-    fclose(f);
+    FILE* f; if (fopen_s(&f, g_inflightPath, "a") != 0 || !f) return false;
+    bool ok = true;
+    for (auto& op : batch) if (fprintf(f, "%s\n", op.ov.slot) < 0) { ok = false; break; }
+    if (ferror(f) || fflush(f) != 0) ok = false;
+    if (fclose(f) == EOF) ok = false;
+    return ok;
 }
 
 // Same journal, one key, for the startup registration loop. That loop hands the game one file at
@@ -978,15 +999,14 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
 // Hand a batch to the game thread: journal first (crash saver), one batch in flight at a time.
 static void submitBatch(std::vector<LiveOp>& batch)
 {
-    // the previous batch drains within a frame; if the game thread stopped pumping (shutdown,
-    // hang) give up after 10s instead of wedging the watcher
-    for (int i = 0; InterlockedCompareExchange(&g_opsPending, 0, 0) && i < 200; ++i) Sleep(50);
-    if (g_opsPending) {
-        logf("live reload: game thread is not draining changes, dropping this batch");
-        for (auto& op : batch) { free((void*)op.ov.slot); free((void*)op.ov.file); }
+    // No waiting on the previous batch any more. The queue is a deque the pump drains in shards,
+    // so a new batch just joins the back; the old 10 second sleep loop blocked the watcher thread
+    // and threw the batch away for no reason other than the queue being busy.
+    if (!journalWrite(batch)) {
+        logf("live reload: the crash-saver journal could not be written, so this change was not applied. Nothing is worth applying that a crash could not then be traced to.");
+        for (auto& op : batch) freeLiveOp(op);
         return;
     }
-    journalWrite(batch);
     EnterCriticalSection(&g_cs);
     for (auto& op : batch) g_opQ.push_back(op);
     LeaveCriticalSection(&g_cs);
@@ -1451,10 +1471,35 @@ static void Setup()
     else {
         void* target = (void*)(p - 0x25);
         logf("registerRawStreamingFile @ %p", target);
+        // Every one of these was logged and then ignored. A failed MH_CreateHook leaves o_regRaw
+        // null while the hook is live, so the first stream call dereferences it and the game dies
+        // on a plugin that already knew it had failed. Bail out instead, and unwind what we own.
         MH_STATUS s = MH_Initialize();                                    logf("MH_Initialize: %s", MH_StatusToString(s));
-        s = MH_CreateHook(target, (void*)&h_regRaw, (void**)&o_regRaw);   logf("MH_CreateHook: %s", MH_StatusToString(s));
-        s = MH_EnableHook(MH_ALL_HOOKS);                                  logf("MH_EnableHook: %s", MH_StatusToString(s));
-        logf(g_off ? "hooked, disabled" : "LIVE — will register base overrides on first stream call");
+        bool ownMh = (s == MH_OK);
+        if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
+            g_off = true;
+            logf("MinHook would not start, so the plugin does nothing this session and leaves the game alone");
+        }
+        else {
+            s = MH_CreateHook(target, (void*)&h_regRaw, (void**)&o_regRaw);
+            logf("MH_CreateHook: %s", MH_StatusToString(s));
+            if (s != MH_OK) {
+                if (ownMh) MH_Uninitialize();
+                g_off = true;
+                logf("the streaming hook could not be created, so the plugin does nothing this session");
+            }
+            else {
+                // this hook, not MH_ALL_HOOKS: nothing else in the process is ours to enable
+                s = MH_EnableHook(target);                                logf("MH_EnableHook: %s", MH_StatusToString(s));
+                if (s != MH_OK) {
+                    logf("MH_RemoveHook after enable failure: %s", MH_StatusToString(MH_RemoveHook(target)));
+                    if (ownMh) MH_Uninitialize();
+                    g_off = true;
+                    logf("the streaming hook could not be enabled, so the plugin does nothing this session");
+                }
+                else logf(g_off ? "hooked, disabled" : "LIVE — will register base overrides on first stream call");
+            }
+        }
     }
 }
 
@@ -1543,8 +1588,9 @@ static DWORD WINAPI BeatLoop(LPVOID)
             // once streaming is live, start the live-reload watcher — before that there is
             // nothing a change could apply to anyway
             if (!g_watcherStarted && !g_off && g_idsReady) {
-                g_watcherStarted = true;
-                CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+                HANDLE w = CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+                if (w) { g_watcherStarted = true; CloseHandle(w); }
+                else logf("live reload: watcher thread could not start (err %lu), trying again next tick", GetLastError());
             }
             // re-assert: DLC mounts and FiveM's loader re-point claimed slots after us; whoever
             // writes the handle last wins, so write ours back. Same mechanism Cfx's own override
@@ -1597,8 +1643,21 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = h; DisableThreadLibraryCalls(h);
         if (SetupSafe()) {   // synchronous: must finish before the game's entry point runs (see Setup)
-            CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
-            CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+            // If the beat thread never starts, scanFinishSafe never runs, g_scanDone is never set
+            // and the first stream call sits in its 5 minute wait for nothing. Signal it and stop.
+            HANDLE beat = CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
+            if (beat) {
+                CloseHandle(beat);
+                HANDLE upd = CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+                if (upd) CloseHandle(upd);
+                else logf("update check thread could not start (err %lu); everything else is unaffected", GetLastError());
+            }
+            else {
+                DWORD e = GetLastError();
+                g_off = true;
+                if (g_scanDone) SetEvent(g_scanDone);
+                logf("the plugin's own thread could not start (err %lu), so it does nothing this session", e);
+            }
         }
     }
     else if (reason == DLL_PROCESS_DETACH) {

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.6 (2026-08-22)
+
+- If the plugin fails to install its hook, it now stops instead of carrying on. Before, a failed
+  install was written to the log and then ignored, and the game crashed on the first thing it tried
+  to load. Now it says so and leaves the game alone for that session.
+- Copying a large folder into `tex_overrides` while the game runs no longer stalls it. The work is
+  done a few files at a time across several frames instead of all at once, and a change is never
+  thrown away just because the previous batch is still going.
+- Fixed the crash protection losing track of files. Two sets of changes close together, and the
+  second overwrote the record of the first, so a crash blamed the wrong file or no file at all.
+- Builds are reproducible now. The same source produces the same bytes, and the build server builds
+  twice and compares before publishing anything. You can build it yourself and check your file
+  matches the release, which is the only real answer to "is this download actually the code above".
+- Thanks to chunguscodes, who found all four and sent them as separate pull requests.
+
 ## 0.8.5 (2026-08-22)
 
 - Characters and animals your server added itself work now. Before this, the plugin only accepted
