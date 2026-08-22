@@ -21,6 +21,16 @@ jobs:
         shell: cmd
         run: build.bat
 
+      - name: Source checks and reproducible rebuild
+        shell: pwsh
+        run: |
+          .\Test-Source.ps1
+          $first = (Get-FileHash .\texoverride.asi -Algorithm SHA256).Hash
+          & .\build.bat
+          if ($LASTEXITCODE -ne 0) { throw "Second build failed with exit code $LASTEXITCODE" }
+          $second = (Get-FileHash .\texoverride.asi -Algorithm SHA256).Hash
+          if ($first -ne $second) { throw "Build is not reproducible: $first != $second" }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

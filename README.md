@@ -8,6 +8,11 @@ Why this exists: FiveM's built-in ways of loading client mods cannot replace cha
 textures. This plugin does it the same way servers do when they add their own clothes. It just
 does it on your computer.
 
+> **emK performance fork:** this branch is based on upstream v0.7.3. It keeps the original
+> replacement and safety model, then hardens malformed-file handling and spreads live and
+> reassert work across game frames. Its version is `0.7.3-emk.1`; the Windows file version is
+> `0.7.3.1`. See [CHANGELOG.md](CHANGELOG.md) for the exact carried changes.
+
 ## Expect bugs
 
 This is a working proof of concept. It has worked in real play sessions, and it will still break
@@ -123,20 +128,21 @@ there is nothing left to check against, and the plugin skips the file.
 
 ## Changing files while the game runs
 
-You do not have to restart FiveM after every change. The plugin watches the `tex_overrides`
-folder while you play and reacts on its own when something in it changes.
+The emK fork keeps a read-only lease on every validated active `.ytd` and `.ydd` for the whole
+FiveM session. This prevents another process from replacing or deleting bytes after validation
+while GTA still holds their raw-streaming path. Change active clothing resources only while FiveM
+is fully closed, then restart and let the startup gate validate the new files.
 
 - Save an edited `overlays.xml` and the tattoo moves on your ped within a second or two. This
   makes tuning easy: nudge a number, save, look, repeat.
-- Overwrite a `.ytd` or `.ydd` the plugin already uses and the new picture shows the next time
-  the game reloads that item. Take the clothing or tattoo off and put it back on to force that.
-  This is the one you want while you are working on a texture, and it always works.
 - Drop in a file with a name nothing else uses and it is picked up right away.
+- An active `.ytd` or `.ydd` overwrite, rename or deletion should be refused by Windows until
+  FiveM closes. This is intentional safety behavior, not a stuck file.
 
 The one thing that cannot happen live is taking over a name the server or a DLC has already
 loaded. Once the game holds a name it will not hand it over until it restarts, so the log says so
 and asks you to restart. On the next launch the plugin claims the name early, before the server
-mounts, and from then on editing that file applies live like everything else.
+mounts it.
 
 There is also a safety net. If the game crashes right after a live change, the plugin remembers
 which files were involved. On the next launch it refuses to load them, and the log tells you.
@@ -174,6 +180,17 @@ OpenIV or CodeWalker, resize the textures to what the original used (clothing is
 512 to 1024 pixels), and save them DXT compressed. Smaller files look nearly identical on a
 character and leave the rest of the game room to breathe.
 
+This fork also includes a preflight report that applies the same RSC7 and 32 MB checks as the
+plugin without launching FiveM:
+
+```powershell
+.\Measure-OverridePack.ps1 `
+  -Root "$env:LOCALAPPDATA\FiveM\FiveM.app\plugins\tex_overrides" `
+  -ReportCsv ".\override-costs.csv"
+```
+
+Use `-FailOnRejected` in packaging or CI when every file must pass the runtime gate.
+
 If it still happens with a light pack, it is the server, not you. Set Extended Texture Budget to
 the highest value your video card allows (Settings, Graphics) and lower Texture Quality one step.
 
@@ -186,7 +203,7 @@ card, which is why this bug shows up on expensive builds too and why maxing the 
 enough on its own. Max it anyway, it is free, but it stops there.
 
 The plugin fixes that for you. On startup it asks Windows how much video memory it is willing to
-give the game right now, holds back a quarter of that (or 1.5 GB, whichever is more) for the parts
+give the game right now, holds back one eighth of that (or 2 GB, whichever is more) for the parts
 of the game that are not textures, and raises the ceiling to whatever is left. You do not have to
 set anything. The log line looks like this:
 
