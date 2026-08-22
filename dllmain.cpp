@@ -149,8 +149,8 @@ struct StrEntry { uint32_t handle, flags; };
 struct StrMgr   { StrEntry* entries; char pad[16]; int numEntries; };
 static StrMgr* g_mgr = nullptr;
 
-static volatile LONG g_regTotal = 0, g_redirects = 0, g_idsReady = 0;
-static long g_reclaims = 0, g_deferred = 0;   // written by the heartbeat thread only
+static volatile LONG g_regTotal = 0, g_redirects = 0, g_redirectFails = 0, g_idsReady = 0;
+static long g_reclaims = 0, g_deferred = 0, g_lateBinds = 0;   // written by the heartbeat thread only
 static bool g_didRegister = false;
 static bool g_b1 = true, g_b2 = false, g_captured = false;
 static CRITICAL_SECTION g_cs;   // guards the one-time registration + the collection map (hook may run on >1 thread)
@@ -523,6 +523,39 @@ static void placementBeatSafe()
 typedef uint32_t* (*RegRaw_t)(uint32_t*, const char*, bool, const char*, bool);
 static RegRaw_t o_regRaw = nullptr;
 
+// FiveM exports this lookup from gta-streaming-five.dll. Its own override path uses the lookup
+// to distinguish a free slot from one that already has a handle. Keeping this dynamic avoids a
+// new import dependency (and lets the plugin degrade cleanly if the export ever changes).
+typedef uint32_t (*GetStreamingIndex_t)(const std::string&);
+static GetStreamingIndex_t g_getStreamingIndexFn = nullptr;
+
+// ABI-compatible views of rage::fiCollection::RawEntry and its exported chunky array. FiveM's
+// public GetPgRawStreamerEntries export returns this collection by const reference (a pointer in
+// the x64 ABI), so no private vtable call is needed to recover the raw handle.
+struct RawEntryView {
+    uint64_t packedFileEntry;
+    uint32_t virtFlags, physFlags;
+    uint64_t timestamp;
+    const char* fileName;
+};
+static_assert(sizeof(RawEntryView) == 32, "FiveM RawEntry layout changed");
+struct RawEntriesView { RawEntryView* memory[64]; uint32_t count; };
+typedef const RawEntriesView* (*GetRawEntries_t)();
+static GetRawEntries_t g_getRawEntriesFn = nullptr;
+
+static void resolveOccupiedSlotExports()
+{
+    if (g_getStreamingIndexFn && g_getRawEntriesFn) return;
+    HMODULE streamingDll = GetModuleHandleA("gta-streaming-five.dll");
+    if (!streamingDll) return;
+    if (!g_getStreamingIndexFn)
+        g_getStreamingIndexFn = (GetStreamingIndex_t)GetProcAddress(streamingDll,
+            "?GetStreamingIndexForName@streaming@@YAIAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z");
+    if (!g_getRawEntriesFn)
+        g_getRawEntriesFn = (GetRawEntries_t)GetProcAddress(streamingDll,
+            "?GetPgRawStreamerEntries@rage@@YAAEBU?$chunkyArray@URawEntry@fiCollection@rage@@$0EAA@$0EA@@1@XZ");
+}
+
 // ============================ live reload (watch tex_overrides) ============================
 // A watcher thread sits on FindFirstChangeNotification: fully event-driven, no polling. When the
 // folder changes it waits half a second for the writes to go quiet, then rescans once.
@@ -579,22 +612,102 @@ static bool rawInvalidate(uint32_t handle)
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-// Register one new file mid-session, same call and flags as the startup pass. SEH: a fault here
-// must not take the game down; worst case the file just is not picked up.
-// Returns why it failed, because the three reasons need three different answers:
-//   0 ok  1 slot already owned  2 registered but no handle came back  3 fault
-static int liveRegister(Ov& ov)
+static uint32_t streamingIndexForName(const char* name)
 {
-    __try {
-        uint32_t id = 0xFFFFFFFF;
-        o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
-        ov.id = id;
-        if (id == 0xFFFFFFFF) return 1;   // the game refuses a slot that already holds a handle
-        if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
-            ov.handle = g_mgr->entries[id].handle;
-        return ov.handle ? 0 : 2;
+    if (!g_getStreamingIndexFn || !name) return 0;
+    try {
+        std::string key(name);
+        return g_getStreamingIndexFn(key);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 3; }
+    catch (...) { return 0; }
+}
+
+// registerRawStreamingFile adds the loose file to pgRawStreamer before asking the streaming
+// manager to attach it to the named slot. If that slot already owns a handle, the second step
+// returns -1 but the raw entry remains usable. This is the same raw ticket FiveM obtains before
+// it takes the occupied-slot branch in LoadStreamingFile.cpp.
+static uint16_t rawIndexForName(const char* file)
+{
+    if (!g_getRawEntriesFn || !file) return 0xFFFF;
+    __try {
+        const RawEntriesView* entries = g_getRawEntriesFn();
+        if (!entries || entries->count > 65535) return 0xFFFF;
+        // Search newest first. RegisterFile normally de-duplicates a path, but newest-first also
+        // does the right thing if the raw streamer ever permits a second entry after an edit.
+        for (uint32_t i = entries->count; i > 0; --i) {
+            uint32_t index = i - 1;
+            RawEntryView* chunk = entries->memory[index / 1024];
+            if (!chunk) continue;
+            const char* candidate = chunk[index % 1024].fileName;
+            if (candidate && _stricmp(candidate, file) == 0) return (uint16_t)index;
+        }
+        return 0xFFFF;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0xFFFF; }
+}
+
+enum ClaimResult {
+    CLAIM_DIRECT = 0,       // registerRawStreamingFile attached the file normally
+    CLAIM_TAKEOVER = 1,     // slot was occupied; reused the raw entry and replaced its handle
+    CLAIM_WAITING = 2,      // raw entry exists; target slot has not appeared in FiveM's map yet
+    CLAIM_REJECTED = 3,     // no usable raw entry/manager/lookup
+    CLAIM_FAULT = 4
+};
+
+static bool validStreamingId(uint32_t id)
+{
+    return g_mgr && g_mgr->entries && id != 0xFFFFFFFF && id < (uint32_t)g_mgr->numEntries;
+}
+
+static int attachRawHandle(Ov& ov, uint32_t targetHint = 0)
+{
+    if (!g_mgr || !g_mgr->entries || !g_getStreamingIndexFn) return CLAIM_REJECTED;
+
+    uint16_t rawIndex = rawIndexForName(ov.file);
+    if (rawIndex == 0 || rawIndex == 0xFFFF) return CLAIM_REJECTED;
+    ov.handle = rawIndex;   // the native/game pgRawStreamer is collection zero
+
+    uint32_t target = targetHint ? targetHint : streamingIndexForName(ov.slot);
+    if (!validStreamingId(target)) {
+        ov.id = 0xFFFFFFFF;
+        return CLAIM_WAITING;
+    }
+
+    ov.id = target;
+    __try {
+        StrEntry& entry = g_mgr->entries[target];
+        // Do not change a handle while the streamer is actively requesting/loading it. The beat
+        // loop already retries deferred slots once a second.
+        if (entry.handle != ov.handle && (entry.flags & 3) < 2)
+            entry.handle = ov.handle;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return CLAIM_FAULT; }
+    return CLAIM_TAKEOVER;
+}
+
+// Claim a loose file, including the case v0.7.3 missed: an existing base/DLC/server slot already
+// has a handle. The failed normal call still creates a pgRawStreamer entry, so recover its raw
+// index and attach that handle to the existing target exactly as FiveM's loader does.
+static int claimOverride(Ov& ov)
+{
+    resolveOccupiedSlotExports();
+    uint32_t id = 0xFFFFFFFF;
+    __try { o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return CLAIM_FAULT; }
+
+    ov.id = id;
+    ov.handle = 0;
+    if (validStreamingId(id)) {
+        ov.handle = g_mgr->entries[id].handle;
+        if (ov.handle) return CLAIM_DIRECT;
+        // A valid target with no handle is unusual, but the raw-entry route can still recover it.
+        return attachRawHandle(ov, id);
+    }
+
+    // Without the optional manager pattern, any ID other than -1 still means the native call succeeded;
+    // it simply cannot be reasserted. A -1 is a real rejected claim and must not be called success.
+    if (id != 0xFFFFFFFF) return CLAIM_DIRECT;
+    return attachRawHandle(ov);
 }
 
 // ---- main-thread pump: IAT shim on the game exe's PeekMessageW import ----
@@ -609,29 +722,23 @@ static void drainOps()   // runs on the game's main thread
     LeaveCriticalSection(&g_cs);
     for (auto& op : ops) {
         if (op.kind == 0) {
-            int why = liveRegister(op.ov);
-            if (why == 0) {
+            int result = claimOverride(op.ov);
+            if (result == CLAIM_DIRECT || result == CLAIM_TAKEOVER || result == CLAIM_WAITING) {
                 EnterCriticalSection(&g_cs);
                 g_ovs.push_back(op.ov); g_bySlot[op.ov.slot] = op.ov.file;
                 LeaveCriticalSection(&g_cs);
-                logf("LIVE-ADD  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+                if (result == CLAIM_DIRECT)
+                    logf("LIVE-ADD  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+                else if (result == CLAIM_TAKEOVER)
+                    logf("LIVE-TAKEOVER  %s  <-  tex_overrides/%s  (occupied slot id=%u, raw handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+                else
+                    logf("LIVE-WAIT  %s has raw handle=%08x; its target slot is not mapped yet and will be attached when it appears", op.ov.slot, op.ov.handle);
                 uint64_t cv = 0, cp = 0;
                 if (rscCost(op.ov.file, &cv, &cp) && cv + cp >= (8u << 20))
                     logf("  HEAVY %.1f MB in memory — likely 4K or uncompressed; shrink it to fight texture loss", (cv + cp) / 1048576.0);
-            } else if (why == 1) {
-                // registerRawStreamingFile refuses a slot that already holds a handle, so a
-                // name the connected server or a DLC already streams cannot be claimed this way.
-                // Cfx hits the same wall and answers it by writing pgRawStreamer handles straight
-                // into the entry (LoadStreamingFile.cpp: handle == 0 -> register, otherwise
-                // overwrite + handle stack). We have no RegisterFile pattern to mint a handle
-                // with, so a restart, which claims the slot before any of that mounts, is the
-                // honest answer. Only brand-new NAMES are affected: editing a file the plugin
-                // already owns goes down the re-stat path and still applies live.
-                logf("live reload: %s is already loaded from the server or a DLC, and the game will not hand a name over while it runs. Restart FiveM and the plugin claims it at startup, before those mount. Editing files it already owns still applies live.", op.ov.slot);
-                free((void*)op.ov.slot); free((void*)op.ov.file);
             } else {
-                logf("live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
-                     why == 2 ? "no handle came back" : "fault inside the game's register call");
+                logf("live reload: could not claim %s (%s)", op.ov.slot,
+                     result == CLAIM_FAULT ? "fault inside the game's streaming path" : "no raw entry, target resolver, or streaming manager");
                 free((void*)op.ov.slot); free((void*)op.ov.file);
             }
         } else {
@@ -896,17 +1003,30 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                 logf("streaming pool looks wrong (entries=%p num=%d) — re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
                 g_mgr = nullptr;
             }
-            int done = 0;
+            int direct = 0, takeovers = 0, waiting = 0, rejected = 0, faults = 0, shown = 0;
             for (auto& ov : g_ovs)
             {
-                uint32_t id = 0xFFFFFFFF;
-                o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
-                ov.id = id;
-                if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
-                    ov.handle = g_mgr->entries[id].handle;
-                if (++done <= 60) logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), id, ov.handle);
+                int result = claimOverride(ov);
+                if (result == CLAIM_DIRECT) ++direct;
+                else if (result == CLAIM_TAKEOVER) ++takeovers;
+                else if (result == CLAIM_WAITING) ++waiting;
+                else if (result == CLAIM_FAULT) ++faults;
+                else ++rejected;
+
+                if (++shown <= 60) {
+                    if (result == CLAIM_DIRECT)
+                        logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), ov.id, ov.handle);
+                    else if (result == CLAIM_TAKEOVER)
+                        logf("OVERRIDE-TAKEOVER  %s  <-  tex_overrides/%s  (occupied slot id=%u, raw handle=%08x)", ov.slot, rel(ov.file), ov.id, ov.handle);
+                    else if (result == CLAIM_WAITING)
+                        logf("OVERRIDE-WAIT  %s  <-  tex_overrides/%s  (raw handle=%08x; target not mapped yet)", ov.slot, rel(ov.file), ov.handle);
+                    else
+                        logf("OVERRIDE-FAILED  %s  <-  tex_overrides/%s  (%s)", ov.slot, rel(ov.file),
+                             result == CLAIM_FAULT ? "fault in streaming path" : "no usable raw entry/target resolver");
+                }
             }
-            logf("registered %d base-slot override(s)", done);
+            logf("claimed %d base-slot override(s): %d direct, %d occupied-slot takeover, %d waiting for target, %d rejected, %d faulted",
+                 direct + takeovers + waiting, direct, takeovers, waiting, rejected, faults);
             if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
             InterlockedExchange(&g_idsReady, 1);
         }
@@ -936,9 +1056,42 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             LeaveCriticalSection(&g_cs);
             if (redirect)
             {
-                InterlockedIncrement(&g_redirects);
-                if (g_redirects <= 100) logf("REDIRECT  %s  ->  tex_overrides/%s", asName, rel(redirect));
-                return o_regRaw(fileId, redirect, b1, asName, b2);
+                uint32_t* resultPtr = o_regRaw(fileId, redirect, b1, asName, b2);
+                uint32_t id = fileId ? *fileId : 0xFFFFFFFF;
+                int recovered = CLAIM_REJECTED;
+
+                EnterCriticalSection(&g_cs);
+                for (auto& ov : g_ovs) {
+                    if (strcmp(ov.slot, key.c_str()) != 0) continue;
+                    if (id != 0xFFFFFFFF) {
+                        ov.id = id;
+                        if (validStreamingId(id)) ov.handle = g_mgr->entries[id].handle;
+                        recovered = ov.handle || !g_mgr ? CLAIM_DIRECT : attachRawHandle(ov, id);
+                    } else {
+                        // The redirected call can hit the same occupied-slot rejection as the
+                        // startup pass. It still leaves the local raw entry available to attach.
+                        recovered = attachRawHandle(ov);
+                    }
+                    break;
+                }
+                LeaveCriticalSection(&g_cs);
+
+                if (recovered == CLAIM_DIRECT || recovered == CLAIM_TAKEOVER || recovered == CLAIM_WAITING) {
+                    LONG count = InterlockedIncrement(&g_redirects);
+                    if (count <= 100) {
+                        if (recovered == CLAIM_DIRECT)
+                            logf("REDIRECT  %s  ->  tex_overrides/%s", asName, rel(redirect));
+                        else if (recovered == CLAIM_TAKEOVER)
+                            logf("REDIRECT-TAKEOVER  %s  ->  tex_overrides/%s", asName, rel(redirect));
+                        else
+                            logf("REDIRECT-WAIT  %s has a local raw handle but its target is not mapped yet", asName);
+                    }
+                } else {
+                    LONG count = InterlockedIncrement(&g_redirectFails);
+                    if (count <= 100)
+                        logf("REDIRECT-FAILED  %s  ->  tex_overrides/%s  (id=%u)", asName, rel(redirect), id);
+                }
+                return resultPtr;
             }
         }
     }
@@ -1244,6 +1397,13 @@ static void Setup()
       } }
     for (auto& pc : g_pl) logf("placement: collection %s — %zu preset(s) from %s", pc.name.c_str(), pc.presets.size(), pc.src.c_str());
 
+    // Public Cfx streaming export used to resolve the global ID of an already-existing slot.
+    // Do not LoadLibrary from inside DllMain; gta-streaming-five is already present when asi-five
+    // loads plugins, and a missing/renamed export simply disables occupied-slot recovery.
+    { resolveOccupiedSlotExports();
+      logf("occupied-slot resolver: index=%s rawEntries=%s",
+           g_getStreamingIndexFn ? "ok" : "MISSING", g_getRawEntriesFn ? "ok" : "MISSING"); }
+
     // rage::strStreamingEngine::ms_info, via the lea in Cfx's g_storeMgr pattern (Streaming.cpp)
     const short PAT_MGR[] = { 0x74,0x1A,0x8B,0x15,-1,-1,-1,-1,0x48,0x8D,0x0D,-1,-1,-1,-1,0x41 };
     if (uint8_t* q = scanModule(PAT_MGR, 16)) {
@@ -1256,7 +1416,9 @@ static void Setup()
     //   getRawStreamer          — the game's pgRawStreamer instance
     //   pgRawStreamer::GetEntry — re-stats an entry when its timestamp is 0
     { const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
-      if (uint8_t* q = scanModule(PAT_GRS, 19)) { if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4); }
+      if (uint8_t* q = scanModule(PAT_GRS, 19)) {
+          if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4);
+      }
       const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
       if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
       logf("live reload: rawStreamer=%s getEntry=%s",
@@ -1371,6 +1533,14 @@ static DWORD WINAPI BeatLoop(LPVOID)
             if (!g_off && g_idsReady && g_mgr && g_mgr->entries) {
                 EnterCriticalSection(&g_cs);
                 for (auto& ov : g_ovs) {
+                    if (ov.handle && ov.id == 0xFFFFFFFF && g_getStreamingIndexFn) {
+                        uint32_t appeared = streamingIndexForName(ov.slot);
+                        if (validStreamingId(appeared)) {
+                            ov.id = appeared;
+                            if (++g_lateBinds <= 60)
+                                logf("LATE-BIND  %s  (target id=%u, raw handle=%08x)", ov.slot, ov.id, ov.handle);
+                        }
+                    }
                     if (!ov.handle || ov.id >= (uint32_t)g_mgr->numEntries) continue;
                     StrEntry& e = g_mgr->entries[ov.id];
                     if (e.handle == ov.handle) continue;
@@ -1388,8 +1558,9 @@ static DWORD WINAPI BeatLoop(LPVOID)
                 budgetBeat();          // re-assert the raised texture budget (aligned data writes)
             }
         }
-        logf("alive (beat %d) — reg=%ld redirects=%ld reclaims=%ld deferred=%ld baseRegistered=%s",
-             beat, (long)g_regTotal, (long)g_redirects, g_reclaims, g_deferred, g_didRegister ? "yes" : "no");
+        logf("alive (beat %d) — reg=%ld redirects=%ld redirectFails=%ld lateBinds=%ld reclaims=%ld deferred=%ld baseRegistered=%s",
+             beat, (long)g_regTotal, (long)g_redirects, (long)g_redirectFails, g_lateBinds,
+             g_reclaims, g_deferred, g_didRegister ? "yes" : "no");
     }
 }
 
