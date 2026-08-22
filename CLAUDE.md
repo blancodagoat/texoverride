@@ -14,7 +14,7 @@ cannot deliver ped textures — they drain before the connect handshake, and the
 non-overlay. This works at the streaming layer instead.
 
 Repo: github.com/blancodagoat/texoverride (owner blancodagoat). Single-file plugin: `dllmain.cpp`.
-Latest tag at time of writing: v0.4.1. Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx
+Latest tag at time of writing: v0.8.6. Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx
 signature a self-built ASI lacks; level 2 disables the ASI loader).
 
 ## The three override mechanisms (all in dllmain.cpp)
@@ -217,6 +217,48 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   fault kills the game, not just the plugin). Probed ONCE there, not per beat. See the `ponytail:` note on `autoBudget` for the upgrade
   path if alt-tabbing turns into stutter reports. `_budget.txt` still overrides; `0` in it disables.
 
+## Paths handed to the game MUST be UTF-8 (0.8.3, a total-failure bug)
+
+Cfx's `ToWide` (`code/client/shared/Utils.cpp`) runs `utf8::replace_invalid` over EVERY narrow
+path FiveM is handed, so FiveM reads our paths as UTF-8. The scan builds them with the ANSI Win32
+APIs. For an ASCII path those are the same bytes, which is why this survived eight releases. One
+non-ASCII letter in the Windows username and the ANSI bytes are invalid UTF-8, get replaced with
+U+FFFD, the path stops existing, and EVERY claim returns `id=4294967295 handle=00000000` with a
+log that looks perfectly healthy. Reported in issue #2 on a Turkish username, 424/424 files
+failing; the reporter (akaloi) proved it with a second Windows account with an ASCII name.
+`Ov::gfile` holds the UTF-8 form and is the ONLY form `o_regRaw` is ever given; `Ov::file` stays
+ANSI for our own file I/O, which is correct on the user's code page. Pure-ASCII paths share one
+string. Anything new handed to the game takes `gfile`. Hits any username with á é ö ü ł ñ or CJK.
+
+## The crash saver, and why 0.8.1's version never fired
+
+Two halves, both needed:
+- `journalOne` writes the key to `_inflight.txt` around each `o_regRaw` in the STARTUP loop;
+  `journalWrite` APPENDS live batches (0.8.6: it used to open `"w"`, so a second batch inside the
+  first's 30s window truncated the first out and a crash then quarantined the wrong file or none).
+- `DLL_PROCESS_DETACH` deletes the journal, and 0.8.1 guarded that with nothing but a comment
+  claiming "a real crash never reaches this line". FALSE: FiveM catches the fault, shows its crash
+  dialog, uploads, then tears the process down, and that path runs detach. The plugin was erasing
+  the name of the file that had just killed the game, so the next launch crashed identically
+  forever. `g_journalHot` blocks the delete while the startup loop owns the journal (0.8.2).
+CONFIRMED WORKING IN THE FIELD: a player's 0.8.4 log opens with
+`QUARANTINED a_c_shepherd.ymt`, then boots and runs. Do not "simplify" the detach guard away.
+
+## docs/ped_collections.tsv + scratch/pedscan (the "is this folder real" oracle)
+
+469 ped collections in b3751, with component/prop counts and source rpf, scanned out of the game
+with CodeWalker.Core. `scratch/pedscan` is the throwaway tool, kept, with a README: it also has a
+substring-find mode which is how we proved `canine` appears NOWHERE in GTA V and that all eight
+animals ship a root `.ymt`. 120 freemode + 8 animal + the rest story/cutscene. Regenerate after a
+game update.
+
+## Server-added peds (0.8.5, why the folder whitelist died)
+
+Servers name their own peds anything. One real server: dogs `canine`, `caninepd`, `caninesd`,
+`caninefd`; cats `blackcat`, `browncat`. None exist in GTA V. Confirmed working in game on
+`caninesd` with a Belgian Malinois head. A server pet-list screenshot is the fastest way to get
+the names; the log's `collection:` lines are the other way.
+
 ## The overlay index (docs/overlay_index.tsv)
 
 3,921 vanilla presets: preset → collection → source overlays.xml path → zone/type/gender/uv/scale/
@@ -259,6 +301,12 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
 
 ## Build & release
 
+- **Builds are reproducible (0.8.6).** `/Brepro` on the link line, and CI builds twice and compares
+  SHA-256 before publishing. Verified: two clean local builds are byte-identical. This is
+  load-bearing for the AV story, because "read the source, build it yourself and compare" is only
+  worth something if the binary is actually checkable. Do not drop the flag or the CI step.
+  **NEVER `sed -i` build.bat**: it strips the CRLF line endings that batch `for /f` needs and the
+  build dies with "'M' is not recognized". Edit it byte-wise (python, `open(p,'rb')`).
 - `build.bat` — MSVC (VS Build Tools 2022, "Desktop development with C++"). `/MT /EHsc /std:c++17`,
   no /clr. The user's shell prints `fastfetch`/`vswhere` noise and exits nonzero even on success;
   trust the `Built texoverride.asi` line, not the exit code.
@@ -272,6 +320,23 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
   (currently 3751, 3788). New game build → add a line or the plugin silently stops loading.
 - Installing over a running FiveM: the loaded .asi is locked. Rename the old one aside
   (`mv ...asi ...asi.old`) then copy the new one in; delete the .old after FiveM closes.
+
+## Contributors and PR handling (2026-08-22)
+
+`chunguscodes` is an active outside contributor who forked and sends real fixes. One 1052-line PR
+was declined with a list of what to split; they came back with four small ones and all four were
+good. That worked, so keep asking for splits.
+Applied in 0.8.6 (cherry-picked, not merged, because 0.8.3-0.8.5 had rewritten the same
+functions): MinHook failure handling + thread handle leaks (#8), the live-reload journal/queue
+fixes (#6), `/Brepro` + CI compare (#7).
+Still open, both with review comments: **#5** loader-lock work, good, but it moves `decideBudget()`
+behind the whole scan; asked for it to sit right after `locateRuntimePatterns` instead. **#9**
+occupied-slot recovery via `GetStreamingModule` export + FindSlot vtable; its constants check out
+(`moduleMgr` at 0x1B8 matches Cfx's `Streaming.h` and its own `NumPendingRequests == 0x1E0`
+assert), it fixed the entry-zero write I flagged, but the bug it was written for turned out to be
+the UTF-8 path bug. Declined pending a post-0.8.3 log showing claims still returning -1.
+Review lesson: BOTH of my first-pass diagnoses this session were wrong, and a WebFetch summary
+INVENTED source quotes. Pull the raw file and grep it; never cite a summarizer.
 
 ## FiveM source facts (verified this session, for future work)
 
