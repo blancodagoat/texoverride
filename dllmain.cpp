@@ -55,9 +55,36 @@ static bool g_off = false;
 
 struct Ov {
     const char* slot; const char* file;   // both persistent, forward-slash, lowercased
+    const char* gfile = nullptr;          // `file` as UTF-8: the only form the game may be handed
     uint32_t id = 0xFFFFFFFF;             // global streaming index our claim landed on
     uint32_t handle = 0;                  // the handle value that points at OUR file
 };
+
+// FiveM reads EVERY narrow path it is handed as UTF-8: Cfx's ToWide (client/shared/Utils.cpp)
+// runs utf8::replace_invalid over it before touching the disk. Our scan builds paths with the
+// ANSI Win32 APIs instead. For an ASCII path those are the same bytes, which is why this went
+// unnoticed. Put one non-ASCII letter in the Windows username and the ANSI bytes are invalid
+// UTF-8, get swapped for U+FFFD, the path no longer exists, and every single claim comes back
+// 0xFFFFFFFF with nothing on the ped and nothing in the log to say why. Reported on a Turkish
+// username (issue #2) and proven there: same files, same build, ASCII account, worked at once.
+// ANSI stays for our own file I/O, which is correct on the user's own code page.
+static const char* toUtf8(const char* ansi)
+{
+    for (const unsigned char* p = (const unsigned char*)ansi; ; ++p) {
+        if (!*p) return ansi;             // pure ASCII: identical in both, share the string
+        if (*p > 0x7F) break;
+    }
+    int wn = MultiByteToWideChar(CP_ACP, 0, ansi, -1, nullptr, 0);
+    if (wn <= 0) return ansi;
+    std::wstring w((size_t)wn, L'\0');
+    if (!MultiByteToWideChar(CP_ACP, 0, ansi, -1, &w[0], wn)) return ansi;
+    int un = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (un <= 0) return ansi;
+    char* out = (char*)malloc((size_t)un);
+    if (!out) return ansi;
+    if (!WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out, un, nullptr, nullptr)) { free(out); return ansi; }
+    return out;                           // leaked on purpose, like every other path here
+}
 static std::vector<Ov> g_ovs;
 static HANDLE g_scanDone = nullptr;   // set once g_ovs is final; the hook waits on it
 static volatile LONG g_waitLogged = 0;
@@ -171,7 +198,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.8.2"
+#define TEXOVERRIDE_VERSION "0.8.3"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -332,7 +359,7 @@ static void scanFinish()
         if (cannotLoad(cd.slot.c_str(), cd.c, false)) continue;
         const char* slot = _strdup(cd.slot.c_str());
         const char* file = _strdup(cd.full.c_str());   // our absolute path
-        g_ovs.push_back({ slot, file });
+        g_ovs.push_back({ slot, file, toUtf8(file) });
         g_bySlot[slot] = file;
         ++n;
         if (cd.c.rsc) {
@@ -342,6 +369,10 @@ static void scanFinish()
     }
     LeaveCriticalSection(&g_cs);
     logf("loaded %d override(s) in %.1fs; mode %s", n, (GetTickCount64() - t0) / 1000.0, g_off ? "OFF" : "ON");
+    // say it out loud when the two path forms differ, so the next report of this arrives already
+    // diagnosed instead of looking like "nothing works and the log looks fine"
+    if (!g_ovs.empty() && g_ovs[0].gfile && g_ovs[0].gfile != g_ovs[0].file)
+        logf("your folder path has a non-English character in it, so the plugin hands the game the UTF-8 form of it. Before 0.8.3 that mismatch made every override silently fail to load.");
     { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
       for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
       for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
@@ -628,7 +659,7 @@ static int liveRegister(Ov& ov)
 {
     __try {
         uint32_t id = 0xFFFFFFFF;
-        o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
+        o_regRaw(&id, ov.gfile ? ov.gfile : ov.file, g_b1, ov.slot, g_b2);
         ov.id = id;
         if (id == 0xFFFFFFFF) return 1;   // the game refuses a slot that already holds a handle
         if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
@@ -843,7 +874,8 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         if (!known) {
             if (!g_origPeek) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
             if (cannotLoadPath(fwd(full).c_str(), key.c_str(), quiet)) continue;   // quiet skips the baseline re-log
-            batch.push_back({ 0, { _strdup(key.c_str()), _strdup(fwd(full).c_str()) }, 0 });
+            { const char* nf = _strdup(fwd(full).c_str());
+              batch.push_back({ 0, { _strdup(key.c_str()), nf, toUtf8(nf) }, 0 }); }
         }
         else if (handle && isChanged) {
             if ((handle >> 16) != 0)   // not in the game's own raw streamer; cannot re-stat it
@@ -968,7 +1000,7 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                 // there, the next launch quarantines this key and boots without it
                 InterlockedExchange(&g_journalHot, 1);
                 journalOne(ov.slot);
-                o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
+                o_regRaw(&id, ov.gfile ? ov.gfile : ov.file, g_b1, ov.slot, g_b2);
                 ov.id = id;
                 if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
                     ov.handle = g_mgr->entries[id].handle;

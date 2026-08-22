@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.3 (2026-08-22)
+
+- Fixed the plugin doing nothing at all for anyone whose Windows username has a non-English
+  letter in it. Turkish, Hungarian, Polish, Chinese, anything outside plain A to Z. The plugin
+  wrote your folder path one way and FiveM read it another, so FiveM went looking for a folder
+  that did not exist, found nothing, and said nothing. The log looked completely normal, every
+  file was listed as loaded, and not one of them was on your character. Found by akaloi in
+  issue #2, who narrowed it down by making a second Windows account with a plain English name
+  and watching the same files work straight away.
+- If your path has such a character, the log now says so on its own line, so nobody has to work
+  that out twice.
+
 ## 0.8.2 (2026-08-22)
 
 - The protection added in 0.8.1 did not actually work, and this fixes it. It writes down which
