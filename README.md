@@ -493,6 +493,16 @@ binary attached.
 - Animal mods that need a different skeleton cannot work. Only `.ytd`, `.ydd`, `.yft` and `.ymt`
   can be handed to the game this way, and the skeleton is in none of them.
 
+## Credits
+
+Written by blancodagoat.
+
+chunguscodes forked the plugin and sends fixes as small, separate pull requests. Four of them
+shipped in 0.8.6: the plugin now stops when its hook fails to install instead of carrying on and
+crashing on the first file it touches, it no longer leaks thread handles, copying a large folder
+into `tex_overrides` while the game runs no longer stalls it or drops a change, and builds are
+reproducible with the build server building twice and comparing before it publishes anything.
+
 ## Files
 
 ```
