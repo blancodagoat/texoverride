@@ -29,10 +29,10 @@ jobs:
       - name: Verify reproducible rebuild
         shell: pwsh
         run: |
-          $first = (Get-FileHash .	exoverride.asi -Algorithm SHA256).Hash
-          & .uild.bat
+          $first = (Get-FileHash .\texoverride.asi -Algorithm SHA256).Hash
+          & .\build.bat
           if ($LASTEXITCODE -ne 0) { throw "Second build failed with exit code $LASTEXITCODE" }
-          $second = (Get-FileHash .	exoverride.asi -Algorithm SHA256).Hash
+          $second = (Get-FileHash .\texoverride.asi -Algorithm SHA256).Hash
           if ($first -ne $second) { throw "Build is not reproducible: $first != $second" }
           Write-Host "reproducible: $first"
 
