@@ -40,6 +40,22 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
   This is what stops a "dog head on a human" mistake.
 - Root files: `.ytd` only, exact-name. Placement `.xml`: fingerprint match required (below).
 - The safety gate exists because filename-alone matching would cross-wire unrelated items. Keep it.
+- **`.ymt` stays ALLOWED for a_c_ names. Do not refuse the type again.** A player on 0.8.0
+  crashed with `ink-island-iowa` at `GTA5_b3751.exe+16765E0`, three frames inside
+  `registerRawStreamingFile`, on the call right after the `.yft` beside it registered fine, so the
+  faulting call was `a_c_shepherd.ymt`. Refusing the type was tried and REVERSED by the user
+  2026-08-22: a ped `.ymt` is a `CPedVariationInfo` and it is the only thing that makes drawables
+  or textures a mod ADDS on top of vanilla selectable, so dropping it guts animal mods. 0.8.1
+  contains the crash instead of preventing it (startup crash saver, below).
+  Mechanism still NOT established. Two dead ends recorded so nobody redoes them: a WebFetch
+  summary claiming "no streaming module for .ymt" INVENTED its quotes (the real
+  `LoadStreamingFile.cpp` says `ymt` zero times, and FiveM add-on peds ship `.ymt` in `stream/`
+  routinely). The real difference from Cfx is that it never calls the function blind (~line 1884):
+  `FindSlot`, then `FindSlotFromHashKey`, and `RegisterRawStreamingFile` ONLY when
+  `Entries[id].handle == 0`, overwriting the handle otherwise. Copying that needs `FindSlot`'s
+  absolute vtable index, which is on this file's do-not-re-derive list, AND the overwrite branch
+  needs a `pgRawStreamer::RegisterFile` pattern we do not have. That is why it is contained, not
+  fixed. Cheapest way to settle it: one `a_c_shepherd.ymt` alone in `tex_overrides`, nothing else.
 
 ## How the hook works
 
@@ -137,7 +153,10 @@ h_peekMsg drains them on the first-caller thread only. Never move register/re-st
 watcher thread. (Historical: rage-allocator-five's ThreadAttachment.cpp stamps allocator TLS into
 every new thread on DLL_THREAD_ATTACH once the game boots — was the fallback plan, not needed.)
 
-CRASH SAVER: batches journal to tex_overrides\_inflight.txt before the game thread touches them;
+CRASH SAVER: covers BOTH paths since 0.8.1. Startup registration journals ONE key at a time
+(`journalOne`) around each `o_regRaw` call, so a fault inside the game's own register function
+quarantines exactly the file it was holding; the journal is deleted when the loop finishes. Live
+batches journal to tex_overrides\_inflight.txt before the game thread touches them;
 journal persists 30s after apply. Crash inside the window → next launch appends those keys to
 _quarantine.txt, and scanDir/rescanTree refuse them until the user deletes that file. Orderly
 exit deletes the journal in DLL_PROCESS_DETACH (a real crash never runs it). New patterns used:
@@ -149,6 +168,14 @@ Texture loss ("stuck low LOD, black walls, restart needed") = the game's VRAM bu
 eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (open cfx issue
 #3874). Two answers in the plugin:
 
+- **Size warning (was a hard gate, 0.5.3 to 0.8.0)**: over 32 MB in either resource segment now
+  logs a `HUGE` line and loads anyway. It used to refuse. The user reversed that 2026-08-22: a
+  refusal makes a pack silently half apply, which reads as a broken plugin and costs more support
+  than the crash. The crash it guarded is real (summer-maine-steak, twice: 64 MB graphics
+  segments, then 77+ MB virtual), so if oversized-file crashes come back, `cannotLoad` in
+  dllmain.cpp is where the refusal goes. Unreadable files are still refused, since there is
+  nothing to load. The startup crash saver is what replaces it: whatever the bad
+  file is, oversized or not, it costs one launch instead of every launch.
 - **Cost audit (0.5.2)**: every .ytd/.ydd on disk is an RSC7 resource; header dwords 2/3
   (system/graphics flags) encode the exact resident memory via CodeWalker's `GetSizeFromFlags`
   (`rscSizeFromFlags` in dllmain.cpp — pages sum x (0x200 << shift)). scanDir totals it, logs

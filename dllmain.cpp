@@ -77,7 +77,7 @@ static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH];
 static uint64_t rscSizeFromFlags(uint32_t f)
 {
     // 64-bit throughout: with the max page shift the 32-bit product wraps at 4 GB, and a
-    // corrupt header could then report a tiny size and slip under the TOO BIG gate
+    // corrupt header could then report a tiny size and go unreported as huge
     uint64_t pages = ((f >> 27) & 0x1)
                    + (((f >> 26) & 0x1)  << 1)
                    + (((f >> 25) & 0x1)  << 2)
@@ -107,13 +107,16 @@ static std::vector<std::pair<uint64_t, std::string>> g_costBig;   // files >= 8 
 
 static void logf(const char* fmt, ...);
 
-// One crash gate for every load path (startup scan, live new file, live overwrite): refuse
-// anything with more than 32 MB in EITHER resource segment. CONFIRMED cause of the
-// summer-maine-steak crash twice over: five files with 64 MB graphics segments (removal test),
-// then a player crashing on mesh files whose 77+ MB sat in the virtual segment while graphics
-// stayed under the line — same crash address both times. 32 MB per segment is verified fine.
-// When the header cannot be read (locked by antivirus, mid-copy) the on-disk size stands in,
-// so the gate never fails open.
+// The size check every load path shares (startup scan, live new file, live overwrite).
+// Over 32 MB in EITHER resource segment it says so and loads the file anyway. Until 0.8.1 it
+// refused instead, because 32 MB is the line the summer-maine-steak crash sat on twice over:
+// five files with 64 MB graphics segments (removal test), then a player crashing on mesh files
+// whose 77+ MB sat in the virtual segment while graphics stayed under the line, same crash
+// address both times. Refusing turned that into a silently half-applied pack, which reads as
+// "the plugin is broken" and costs more support than the crash did, so the warning stands alone
+// now. If oversized-file crashes come back this is the first thing to put back.
+// The ONE thing still refused is a file that cannot be opened at all, since there is nothing to
+// load; when the header will not read, the on-disk size stands in for the warning.
 // Reading the header and judging it are separate so the startup scan can do the reads on
 // several threads and then judge them in file order.
 struct Cost { uint64_t cv, cp; bool readable, rsc; };
@@ -127,21 +130,21 @@ static Cost readCost(const char* path)
     c.cp = (((uint64_t)fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;   // on-disk stand-in
     return c;
 }
-static bool tooBigJudge(const char* key, const Cost& c, bool quiet)
+static bool cannotLoad(const char* key, const Cost& c, bool quiet)
 {
     if (!c.readable) {
-        if (!quiet) logf("UNREADABLE %s — cannot open it, so it is not loaded this launch", key);
+        if (!quiet) logf("UNREADABLE %s - cannot open it, so it is not loaded this launch", key);
         return true;
     }
     uint64_t worst = (c.cv > c.cp) ? c.cv : c.cp;
-    if (worst <= (32ull << 20)) return false;
-    if (!quiet) logf("TOO BIG  %s — %.1f MB of %s data; files this big are the confirmed cause of game crashes, so it is NOT loaded. Shrink it (CodeWalker, Tools, Shrink Textures).",
-                     key, worst / 1048576.0, (c.cv > c.cp) ? "mesh" : "texture");
-    return true;
+    if (worst > (32ull << 20) && !quiet)
+        logf("HUGE  %s - %.1f MB of %s data, and it IS loaded. Files this big have crashed the game before, so if you start crashing this is the first one to shrink (CodeWalker, Tools, Shrink Textures).",
+             key, worst / 1048576.0, (c.cv > c.cp) ? "mesh" : "texture");
+    return false;
 }
-static bool tooBigToStream(const char* path, const char* key, bool quiet)
+static bool cannotLoadPath(const char* path, const char* key, bool quiet)
 {
-    return tooBigJudge(key, readCost(path), quiet);
+    return cannotLoad(key, readCost(path), quiet);
 }
 
 // rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
@@ -167,7 +170,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.8.0"
+#define TEXOVERRIDE_VERSION "0.8.1"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -225,8 +228,10 @@ static bool isOverrideExt(const std::string& ln)
 // Animal peds are the exception. Most of them (pug, poodle, westy, cat, coyote, deer...) are not
 // collection-based at all: model, fragment and variation metadata are bare a_c_<name>.ydd/.yft/
 // .ymt files. The eight collection-based ones still keep their .yft and .ymt at the root beside
-// the folder, and the .ymt is what makes any drawable or texture a mod ADDS on top of vanilla
-// selectable at all. So those three types are allowed at the root, for a_c_ names only.
+// the folder, and the .ymt (a CPedVariationInfo) is what makes any drawable or texture a mod ADDS
+// on top of vanilla selectable at all. So those three types are allowed at the root, for a_c_
+// names only. One player's .ymt took the game down at registration on 0.8.0; that is now the
+// startup crash saver's job to contain rather than a reason to refuse the whole type.
 static bool isAllowedKey(const std::string& key)
 {
     size_t s = key.find('/');
@@ -235,6 +240,17 @@ static bool isAllowedKey(const std::string& key)
     if (hasExt(key, ".ytd")) return true;
     return lower(key).rfind("a_c_", 0) == 0
         && (hasExt(key, ".ydd") || hasExt(key, ".yft") || hasExt(key, ".ymt"));
+}
+
+// Types we walk past on purpose. Announcing beats a silent skip: a .meta is a file mods really do
+// ship, so a user who sees nothing assumes the plugin broke.
+static bool isIgnoredType(const std::string& ln, const std::string& rel, bool announce)
+{
+    if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
+        if (announce) logf("IGNORED %s - .meta files hold shop data (prices/menus), not looks; see README", rel.c_str());
+        return true;
+    }
+    return false;
 }
 
 // The walk itself opens nothing: it only decides which names are ours.
@@ -250,13 +266,7 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
         std::string childRel = rel.empty() ? name : rel + "\\" + name;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { walkDir(base, childRel, out); continue; }
         std::string ln = lower(name);
-        // .meta (shop_tattoo.meta etc.) is shop data, not looks — not applied yet, but the
-        // pack-folder layout (tex_overrides/mplowrider/shop_tattoo.meta) is the reserved
-        // convention for it, so acknowledge the file instead of silently skipping it
-        if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
-            logf("IGNORED %s — .meta files hold shop data (prices/menus), not looks; see README", fwd(childRel).c_str());
-            continue;
-        }
+        if (isIgnoredType(ln, fwd(childRel), true)) continue;
         if (!isOverrideExt(ln)) continue;
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
         // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
@@ -318,7 +328,7 @@ static void scanFinish()
     EnterCriticalSection(&g_cs);   // the watcher can be appending to g_ovs by now
     int n = 0;
     for (auto& cd : g_cands) {
-        if (tooBigJudge(cd.slot.c_str(), cd.c, false)) continue;
+        if (cannotLoad(cd.slot.c_str(), cd.c, false)) continue;
         const char* slot = _strdup(cd.slot.c_str());
         const char* file = _strdup(cd.full.c_str());   // our absolute path
         g_ovs.push_back({ slot, file });
@@ -719,6 +729,17 @@ static void journalWrite(const std::vector<LiveOp>& batch)
     fclose(f);
 }
 
+// Same journal, one key, for the startup registration loop. That loop hands the game one file at
+// a time, so the journal names exactly the file in the game's hands: a fault inside
+// registerRawStreamingFile quarantines that one file and nothing else. Live batches go in
+// together and are journaled together, which is why there are two writers.
+static void journalOne(const char* key)
+{
+    FILE* f; if (fopen_s(&f, g_inflightPath, "w") != 0 || !f) return;
+    fputs(key, f); fputc('\n', f);
+    fclose(f);
+}
+
 // Called at startup, before the folder scan. A leftover _inflight.txt means the game died while
 // (or moments after) those files were being applied live — quarantine them.
 static void crashSaverStartup()
@@ -735,7 +756,7 @@ static void crashSaverStartup()
             any = true;
         }
         fclose(f); if (q) fclose(q);
-        if (any) logf("CRASH SAVER: the game did not shut down cleanly right after live changes; the files involved are quarantined");
+        if (any) logf("CRASH SAVER: last run died while the game was taking these file(s); they are quarantined so this launch gets past it");
     }
     DeleteFileA(g_inflightPath);
     if (fopen_s(&f, g_quarantinePath, "r") == 0 && f) {
@@ -802,10 +823,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         if (!isNew && !isChanged) continue;
 
         std::string ln = lower(name);
-        if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
-            if (isNew && !quiet) logf("IGNORED %s — .meta files hold shop data (prices/menus), not looks; see README", fwd(childRel).c_str());
-            continue;
-        }
+        if (isIgnoredType(ln, fwd(childRel), isNew && !quiet)) continue;
         if (sub.empty() && ln.size() > 4 && ln.compare(ln.size()-4, 4, ".xml") == 0) { if (!quiet) xmls.push_back(name); continue; }
         if (!isOverrideExt(ln)) continue;
 
@@ -823,7 +841,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
 
         if (!known) {
             if (!g_origPeek) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
-            if (tooBigToStream(fwd(full).c_str(), key.c_str(), quiet)) continue;   // crash gate; quiet skips the baseline re-log
+            if (cannotLoadPath(fwd(full).c_str(), key.c_str(), quiet)) continue;   // quiet skips the baseline re-log
             batch.push_back({ 0, { _strdup(key.c_str()), _strdup(fwd(full).c_str()) }, 0 });
         }
         else if (handle && isChanged) {
@@ -831,10 +849,10 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
                 logf("live reload: %s changed, restart to apply (handle %08x not raw)", key.c_str(), handle);
             else if (!g_origPeek)
                 logf("live reload: %s changed, restart to apply", key.c_str());
-            else if (tooBigToStream(fwd(full).c_str(), key.c_str(), false))
+            else if (cannotLoadPath(fwd(full).c_str(), key.c_str(), false))
                 // the registered slot still points at this path with the OLD size cached, so the
                 // game may read a truncated slice of the new content; make that loud
-                logf("live reload: %s grew past the safe size and was NOT re-read; restore the smaller file or restart", key.c_str());
+                logf("live reload: %s cannot be opened, so it was NOT re-read; free it up or restart", key.c_str());
             else
                 batch.push_back({ 1, { _strdup(key.c_str()), nullptr }, handle });
         }
@@ -945,12 +963,16 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             for (auto& ov : g_ovs)
             {
                 uint32_t id = 0xFFFFFFFF;
+                // named in _inflight.txt for the duration of the call; if the game dies in
+                // there, the next launch quarantines this key and boots without it
+                journalOne(ov.slot);
                 o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
                 ov.id = id;
                 if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
                     ov.handle = g_mgr->entries[id].handle;
                 if (++done <= 60) logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), id, ov.handle);
             }
+            DeleteFileA(g_inflightPath);   // whole loop survived; nothing to quarantine
             logf("registered %d base-slot override(s)", done);
             if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
             InterlockedExchange(&g_idsReady, 1);
