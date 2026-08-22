@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- MinHook setup now enables only TexOverride's own target and unwinds partial initialization on
+  failure. Detached worker-thread handles are closed, and failed watcher creation is retried.
+
 ## 0.8.4 (2026-08-22)
 
 - Animal `.ymt` files are now handed to the game later, about a minute after you start, instead

@@ -1398,10 +1398,34 @@ static void Setup()
     else {
         void* target = (void*)(p - 0x25);
         logf("registerRawStreamingFile @ %p", target);
-        MH_STATUS s = MH_Initialize();                                    logf("MH_Initialize: %s", MH_StatusToString(s));
-        s = MH_CreateHook(target, (void*)&h_regRaw, (void**)&o_regRaw);   logf("MH_CreateHook: %s", MH_StatusToString(s));
-        s = MH_EnableHook(MH_ALL_HOOKS);                                  logf("MH_EnableHook: %s", MH_StatusToString(s));
-        logf(g_off ? "hooked, disabled" : "LIVE — will register base overrides on first stream call");
+        MH_STATUS s = MH_Initialize(); logf("MH_Initialize: %s", MH_StatusToString(s));
+        bool ownMh = s == MH_OK;
+        if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
+            g_off = true;
+            logf("MinHook initialization failed — plugin disabled for this session");
+        }
+        else {
+            s = MH_CreateHook(target, (void*)&h_regRaw, (void**)&o_regRaw);
+            logf("MH_CreateHook: %s", MH_StatusToString(s));
+            if (s != MH_OK) {
+                if (ownMh) MH_Uninitialize();
+                g_off = true;
+                logf("streaming hook creation failed — plugin disabled for this session");
+            }
+            else {
+                // Only enable the hook this plugin owns. Enabling every MinHook target in the
+                // process can activate another plugin's half-configured hook unexpectedly.
+                s = MH_EnableHook(target); logf("MH_EnableHook: %s", MH_StatusToString(s));
+                if (s != MH_OK) {
+                    MH_STATUS rm = MH_RemoveHook(target);
+                    logf("MH_RemoveHook after enable failure: %s", MH_StatusToString(rm));
+                    if (ownMh) MH_Uninitialize();
+                    g_off = true;
+                    logf("streaming hook enable failed — plugin disabled for this session");
+                }
+                else logf(g_off ? "hooked, disabled" : "LIVE — will register base overrides on first stream call");
+            }
+        }
     }
 }
 
@@ -1490,8 +1514,12 @@ static DWORD WINAPI BeatLoop(LPVOID)
             // once streaming is live, start the live-reload watcher — before that there is
             // nothing a change could apply to anyway
             if (!g_watcherStarted && !g_off && g_idsReady) {
-                g_watcherStarted = true;
-                CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+                HANDLE watcher = CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+                if (watcher) {
+                    g_watcherStarted = true;
+                    CloseHandle(watcher);
+                }
+                else logf("live reload: watcher thread could not start (err %lu), retrying", GetLastError());
             }
             // re-assert: DLC mounts and FiveM's loader re-point claimed slots after us; whoever
             // writes the handle last wins, so write ours back. Same mechanism Cfx's own override
@@ -1570,8 +1598,19 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = h; DisableThreadLibraryCalls(h);
         if (SetupSafe()) {   // synchronous: must finish before the game's entry point runs (see Setup)
-            CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
-            CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+            HANDLE beat = CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
+            if (beat) {
+                CloseHandle(beat);
+                HANDLE update = CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
+                if (update) CloseHandle(update);
+                else logf("update-check thread could not start (err %lu)", GetLastError());
+            }
+            else {
+                DWORD error = GetLastError();
+                g_off = true;
+                if (g_scanDone) SetEvent(g_scanDone);
+                logf("beat thread could not start (err %lu) — plugin disabled", error);
+            }
         }
     }
     else if (reason == DLL_PROCESS_DETACH) {
