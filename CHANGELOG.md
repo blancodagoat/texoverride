@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.4 (2026-08-22)
+
+- Animal `.ymt` files are now handed to the game later, about a minute after you start, instead
+  of during startup. On 0.8.0 one player's game died at the exact moment the plugin passed its
+  dog's `.ymt` over, while the `.yft` sitting right next to it went through without trouble. The
+  difference we can do something about is when it happens: startup is very early, before the part
+  of the game that reads those files has finished being built. So they wait, and go over on the
+  game's own thread once everything is up. The log says `LATE-REG` when one lands.
+- This is a considered guess, not a proven fix, and it is written to be safe either way. If it
+  still goes wrong, the file is written down first, so the next launch skips that one file and
+  starts normally instead of dying in the same place again.
+- Nothing else changed about how `.ymt` files work. They are still loaded, still needed for
+  anything an animal mod adds on top of the original, and still only accepted for `a_c_` names.
+
 ## 0.8.3 (2026-08-22)
 
 - Fixed the plugin doing nothing at all for anyone whose Windows username has a non-English

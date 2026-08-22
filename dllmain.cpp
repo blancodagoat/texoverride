@@ -198,7 +198,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.8.3"
+#define TEXOVERRIDE_VERSION "0.8.4"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -627,6 +627,7 @@ typedef uint8_t* (*RawGetEntry_t)(void*, uint16_t);   // pgRawStreamer::GetEntry
 static GetRawStreamer_t g_getRawStreamerFn = nullptr;
 static RawGetEntry_t    g_rawGetEntryFn = nullptr;
 static bool g_watcherStarted = false;
+static bool g_lateDone = false;        // the held-back .ymt batch is submitted once
 
 struct LiveOp { int kind; Ov ov; uint32_t handle; };            // kind: 0 = register, 1 = re-stat
 static std::vector<LiveOp> g_opQ;                               // guarded by g_cs
@@ -706,6 +707,23 @@ static void drainOps()   // runs on the game's main thread
                      why == 2 ? "no handle came back" : "fault inside the game's register call");
                 free((void*)op.ov.slot); free((void*)op.ov.file);
             }
+        } else if (op.kind == 2) {
+            // deliberately held back from the startup loop (see there). The Ov here is a copy:
+            // register through it, then carry the result onto the real entry.
+            int why = liveRegister(op.ov);
+            if (why == 0) {
+                EnterCriticalSection(&g_cs);
+                for (auto& ov : g_ovs)
+                    if (strcmp(ov.slot, op.ov.slot) == 0) { ov.id = op.ov.id; ov.handle = op.ov.handle; break; }
+                LeaveCriticalSection(&g_cs);
+                logf("LATE-REG  %s  (id=%u handle=%08x)", op.ov.slot, op.ov.id, op.ov.handle);
+            } else {
+                logf("LATE-REG  %s did not take (%s); anything the mod ADDED on top of the original stays unselectable this session", op.ov.slot,
+                     why == 1 ? "the game already has that name loaded" :
+                     why == 2 ? "no handle came back" : "fault inside the game's register call");
+            }
+            free((void*)op.ov.slot); free((void*)op.ov.file);
+            if (op.ov.gfile && op.ov.gfile != op.ov.file) free((void*)op.ov.gfile);
         } else {
             if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
                 logf("LIVE-UPDATE  %s reread from disk; reapply the outfit or tattoo to see it", op.ov.slot);
@@ -992,9 +1010,18 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                 logf("streaming pool looks wrong (entries=%p num=%d) — re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
                 g_mgr = nullptr;
             }
-            int done = 0;
+            int done = 0, held = 0;
             for (auto& ov : g_ovs)
             {
+                // A ped .ymt is the one type known to fault INSIDE the game's own register call
+                // (ink-island-iowa, 0.8.0). Everything else in this loop, the .yft beside it
+                // included, goes through fine. The one difference we can act on is timing: this
+                // runs on the first stream call, seconds in and well before the session exists,
+                // and the metadata store a .ymt needs is the last of the stores to come up.
+                // So hand these to the game later, on its own thread, the way Cfx does all of
+                // its mid-session registration. Unproven, but survivable: the batch is journaled,
+                // so if it still faults the next launch quarantines that one file and boots.
+                if (hasExt(ov.slot, ".ymt")) { ++held; continue; }
                 uint32_t id = 0xFFFFFFFF;
                 // named in _inflight.txt for the duration of the call; if the game dies in
                 // there, the next launch quarantines this key and boots without it
@@ -1009,6 +1036,7 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             InterlockedExchange(&g_journalHot, 0);
             DeleteFileA(g_inflightPath);   // whole loop survived; nothing to quarantine
             logf("registered %d base-slot override(s)", done);
+            if (held) logf("holding %d .ymt file(s) back until the game is running; they are handed over on the game's own thread a little later", held);
             if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
             InterlockedExchange(&g_idsReady, 1);
         }
@@ -1482,6 +1510,32 @@ static DWORD WINAPI BeatLoop(LPVOID)
                     if (++g_reclaims <= 60) logf("RECLAIM  %s  (%08x -> %08x)", ov.slot, old, ov.handle);
                 }
                 LeaveCriticalSection(&g_cs);
+            }
+            // the .ymt files the startup loop held back. Wait for the pump (that is the game's
+            // own thread) and give the session 30s to finish coming up, which is the whole point
+            // of holding them: they go over late, once every store is built. Once only.
+            if (!g_off && g_idsReady && !g_origPeek && !g_lateDone && beat >= 3) {
+                g_lateDone = true;   // no game-thread pump: say so rather than hold them forever
+                int n = 0;
+                EnterCriticalSection(&g_cs);
+                for (auto& ov : g_ovs) if (ov.id == 0xFFFFFFFF && hasExt(ov.slot, ".ymt")) ++n;
+                LeaveCriticalSection(&g_cs);
+                if (n) logf("%d .ymt file(s) cannot be handed over: no game-thread pump this session, so they are not applied. Everything else still works.", n);
+            }
+            if (!g_off && g_idsReady && g_origPeek && !g_lateDone && beat >= 3) {
+                g_lateDone = true;
+                std::vector<LiveOp> late;
+                EnterCriticalSection(&g_cs);
+                for (auto& ov : g_ovs) {
+                    if (ov.id != 0xFFFFFFFF || !hasExt(ov.slot, ".ymt")) continue;
+                    const char* f = _strdup(ov.file);
+                    late.push_back({ 2, { _strdup(ov.slot), f, toUtf8(f) }, 0 });
+                }
+                LeaveCriticalSection(&g_cs);
+                if (!late.empty()) {
+                    logf("handing %d held-back .ymt file(s) to the game now", (int)late.size());
+                    submitBatch(late);
+                }
             }
             if (!g_off) {
                 EnterCriticalSection(&g_cs);
