@@ -1,43 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.8.7 (2026-08-23)
 
+- Animations can be replaced now. Put a `.ycd` file in `tex_overrides` and the plugin claims that
+  animation dictionary the same way it claims a tattoo texture. Clips inside are matched by the
+  game's own name hash, so a file only has to carry the right names to work.
+- Fixed claims that reported success and changed nothing. When the game already owns a name, the
+  call the plugin uses can hand back a brand new slot instead of the one in use, so the file was
+  loaded into a place nothing ever reads. The log looked perfect while nothing changed on screen.
+  The plugin now asks the game which slot a name really resolves to and holds both.
+- A file the server or a DLC already has loaded can be taken over mid-session in more cases, by
+  attaching to the slot the game reports rather than asking for a new one. If the slot has not
+  appeared yet, the file waits and is picked up when it does.
+- Startup counts tell you which of those happened, rather than one total: registered directly,
+  taken over from an occupied slot, waiting, or refused.
 - Less of the plugin's work now happens before the game is allowed to start. Reading the
   crash-saver journal, listing your tex_overrides folder, reading the placement and budget files
   and finding the game's optional internals all moved to the background thread. The only thing
   that still has to happen first is installing the hook itself.
+- Thanks to chunguscodes, whose pull requests are behind the last three of those.
 
-## 0.8.6 (2026-08-22)
-
-- If the plugin fails to install its hook, it now stops instead of carrying on. Before, a failed
-  install was written to the log and then ignored, and the game crashed on the first thing it tried
-  to load. Now it says so and leaves the game alone for that session.
-- Copying a large folder into `tex_overrides` while the game runs no longer stalls it. The work is
-  done a few files at a time across several frames instead of all at once, and a change is never
-  thrown away just because the previous batch is still going.
-- Fixed the crash protection losing track of files. Two sets of changes close together, and the
-  second overwrote the record of the first, so a crash blamed the wrong file or no file at all.
-- Builds are reproducible now. The same source produces the same bytes, and the build server builds
-  twice and compares before publishing anything. You can build it yourself and check your file
-  matches the release, which is the only real answer to "is this download actually the code above".
-- Thanks to chunguscodes, who found all four and sent them as separate pull requests.
-
-## 0.8.5 (2026-08-22)
-
-- Characters and animals your server added itself work now. Before this, the plugin only accepted
-  folders whose names came with the game, so a dog your server put in as `caninesd` was refused
-  before anything was even read. The folder name is no longer what decides. What decides is whether
-  the files inside are named the way GTA names body parts, like `head_000_r.ydd` or
-  `uppr_diff_001_a_uni.ytd`. Name the folder after the model and it works.
-- Nothing unsafe got easier. A vehicle texture, a prop or a map file is still refused whatever
-  folder you put it in, because none of them are named like body parts. That was the real job the
-  old folder list was doing. Story and cutscene characters are still refused by name.
-- Animal `.ymt` files are refused now, and the log explains why. The game already owns those names
-  and will not hand one over: the call that would replace it crashes the game outright, which is
-  what a few people had been running into. Every animal ships one, so this can never work. The rest
-  of an animal mod still loads. Only the parts a mod ADDED on top of the original stay unpickable.
-- Every other `.ymt` name is accepted, which is what a clothing pack needs and what was blocked
-  before for no good reason.
 
 ## 0.8.4 (2026-08-22)
 
