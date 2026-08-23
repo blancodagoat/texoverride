@@ -1345,7 +1345,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
     FindClose(h);
 }
 
-// Hand a batch to the game thread: journal first (crash saver), one batch in flight at a time.
+// Hand a batch to the game thread: journal first, then bound and coalesce pending work by slot.
 static void submitBatch(std::vector<LiveOp>& batch)
 {
     // No waiting on the previous batch any more. The queue is a deque the pump drains in shards,
@@ -1356,10 +1356,41 @@ static void submitBatch(std::vector<LiveOp>& batch)
         for (auto& op : batch) freeLiveOp(op);
         return;
     }
+    size_t dropped = 0;
     EnterCriticalSection(&g_cs);
-    for (auto& op : batch) g_opQ.push_back(op);
+    try {
+        for (auto& op : batch) {
+            auto same = std::find_if(g_opQ.begin(), g_opQ.end(), [&](const LiveOp& queued) {
+                return strcmp(queued.ov.slot, op.ov.slot) == 0;
+            });
+            if (same != g_opQ.end()) {
+                // A re-stat cannot replace a registration that has not run yet: there is no raw
+                // handle to refresh until that registration succeeds. The pending registration
+                // already points at this path and will read the newest bytes.
+                if (same->kind == 0 && op.kind == 1) continue;
+
+                freeLiveOp(*same);
+                *same = op;
+                op.ov.slot = op.ov.file = op.ov.gfile = nullptr;
+            }
+            else if (g_opQ.size() < 2048) {
+                g_opQ.push_back(op);
+                op.ov.slot = op.ov.file = op.ov.gfile = nullptr;
+            }
+            else {
+                ++dropped;
+            }
+        }
+    }
+    catch (...) {
+        LOG_ERROR(LogCategory::Live, "Live reload: queue allocation failed; remaining changes need a FiveM restart");
+    }
+    if (!g_opQ.empty()) InterlockedExchange(&g_opsPending, 1);
     LeaveCriticalSection(&g_cs);
-    InterlockedExchange(&g_opsPending, 1);
+    for (auto& op : batch) freeLiveOp(op);
+    if (dropped) {
+        LOG_WARN(LogCategory::Live, "Live reload: queue limit reached; %zu change(s) need a FiveM restart", dropped);
+    }
     g_journalClearAt = GetTickCount64() + 30000;   // journal outlives the apply; see CRASH SAVER above
 }
 
