@@ -244,8 +244,8 @@ So the first thing to do is start the game once and read the log. Every dictiona
 streams is listed:
 
 ```
-collection: gtawpl_1.ycd                      [overridable]
-collection: agangsign2@animation.ycd          [overridable]
+file:       gtawpl_1.ycd                      [overridable]
+file:       agangsign2@animation.ycd          [overridable]
 ```
 
 If the dictionary your animation uses is in that list, you can replace it. If it is not, the
@@ -421,6 +421,7 @@ crashed, the log from the crashed session is still there.
 | `REDIRECT name -> file` | A server file was swapped for yours |
 | `PLACEMENT ...` | A tattoo position change was applied |
 | `collection: name [tag]` | A collection the server uses, and whether it is reachable |
+| `file:       name [tag]` | A loose file the server streams, and whether it is reachable |
 | `update check: ...` | Whether you have the newest version |
 | `alive (beat N) ...` | Heartbeat; the plugin is still running |
 | `pattern NOT FOUND` | The game updated; the plugin needs an update |

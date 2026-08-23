@@ -7,6 +7,12 @@
   claims a texture or animation. The file name has to start with `w_`, which is how every GTA V
   weapon is named. Anything else, like a vehicle part or a prop, is still refused.
 - Weapon textures (`.ytd`) already worked before this. Nothing changed there.
+- The list of collections in the log was wrong in three ways and is fixed. A collection was
+  labelled by whichever of its files the server happened to stream first, so a collection you can
+  override could be marked as one you cannot. Loose files were being listed as collections, under
+  their own name plus extension. And the list stopped dead at 500 names without saying so, which
+  read like a server that streams nothing. Collections that are neither a character nor a blocked
+  one now say the honest thing, which is that it depends on the file names inside.
 
 ## 0.8.7 (2026-08-23)
 

@@ -1433,12 +1433,34 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             InterlockedExchange(&g_idsReady, 1);
         }
 
-        // MAP: record each distinct collection the server streams that is overridable
+        // MAP: one line per distinct thing the server streams. This is the discovery channel:
+        // names we REFUSE have to appear too, or a refused collection reads exactly like one the
+        // server never streamed, and a user's log is the only way we ever learn about a naming
+        // family the gate does not know yet. That is how the folder whitelist died in 0.8.5.
+        //
+        // The tag is worked out from the COLLECTION, not from whichever file happened to arrive
+        // first. isAllowedKey answers a question about one file; using its answer as the label for
+        // the whole collection mislabelled any collection whose first streamed file was oddly
+        // named. Three states, because for a collection that is neither freemode/a_c_ nor blocked
+        // the answer genuinely depends on the file names inside it.
+        //
+        // Root files are not collections at all, so they are listed under their own heading
+        // instead of being run through collectionOf, which returns the whole filename for them.
         std::string keyLower = lower(asName);
-        if (isAllowedKey(keyLower)) {
-            std::string coll = collectionOf(keyLower);
-            if (g_collSeen.insert(coll).second)
-                logf("collection: %-40s [overridable]", coll.c_str());
+        bool rootFile = keyLower.find('/') == std::string::npos;
+        std::string coll = rootFile ? keyLower : collectionOf(keyLower);
+
+        if (g_collSeen.insert(coll).second) {
+            const char* tag;
+            if (rootFile)                       tag = isAllowedKey(keyLower) ? "overridable" : "OTHER - never touched";
+            else if (isPedCollection(coll))     tag = "overridable";
+            else if (isBlockedCollection(coll)) tag = "OTHER - never touched";
+            else                                tag = "depends on the file names inside";
+            logf("%s: %-40s [%s]", rootFile ? "file      " : "collection", coll.c_str(), tag);
+            // the old cap stopped logging at 500 and said nothing, so the tail looked like a
+            // server that streams nothing. Say it out loud instead.
+            if (g_collSeen.size() == 500)
+                logf("collection: 500 distinct names logged, the rest will not be listed");
         }
 
         LeaveCriticalSection(&g_cs);
