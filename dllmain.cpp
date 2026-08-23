@@ -182,6 +182,23 @@ static bool cannotLoadPath(const char* path, const char* key, bool quiet)
 // rage::strStreamingEngine::ms_info — the streaming info pool. Entries[id].handle is what the
 // loader actually opens; layout from Cfx's gta-streaming-five/include/Streaming.h.
 struct StrEntry { uint32_t handle, flags; };
+// rage::strStreamingInfo packs three things into that second dword (Rockstar streamingdefs.h,
+// cross-checked against Cfx's ReleaseObject(idx, 0xF1)):
+//   bits 0-1   status: 0 NOTLOADED, 1 LOADED, 2 LOADREQUESTED, 3 LOADING
+//   bits 2-15  dependent count
+//   bits 16-31 STRFLAGs: DONTDELETE 1<<0, FORCE_LOAD 1<<1, PRIORITY_LOAD 1<<2, LOADSCENE 1<<3,
+//              MISSION 1<<4, CUTSCENE 1<<5, INTERIOR 1<<6, ZONEDASSET 1<<7
+// Read only. Never write a STRFLAG by hand: the setters also move the entry between the loaded
+// and persistent lists and maintain m_numPriorityRequests, and a raw write desyncs both.
+static const char* strStatusText(uint32_t flags)
+{
+    switch (flags & 3) {
+    case 0:  return "not loaded";
+    case 1:  return "ALREADY LOADED";
+    case 2:  return "load requested";
+    default: return "loading";
+    }
+}
 struct StrMgr   { StrEntry* entries; char pad[16]; int numEntries; };
 static StrMgr* g_mgr = nullptr;
 
@@ -1389,6 +1406,22 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                 }
                 logf("verify: %d slot(s) now point at your file, %d still point at the game's, %d got no handle. The beat re-asserts the second group once a second.",
                      pointing, elsewhere, nohandle);
+
+                // Owning the slot is only half of it. If the game already has the asset in memory
+                // it will not read the handle again, so the swap is invisible no matter how
+                // correct every line above is. Count how many of ours are already resident.
+                { int resident = 0, pending = 0, cold = 0, pinned = 0, shownHot = 0;
+                  for (auto& ov : g_ovs) {
+                      if (ov.id >= (uint32_t)g_mgr->numEntries) continue;
+                      uint32_t f = g_mgr->entries[ov.id].flags;
+                      if ((f & 3) == 1) ++resident; else if ((f & 3) == 0) ++cold; else ++pending;
+                      if ((f >> 16) & 1) ++pinned;
+                      if ((f & 3) == 1 && ++shownHot <= 10)
+                          logf("  ALREADY IN MEMORY  %s (status=%s, strflags=%04x, deps=%u) — the game will not re-read this one until it drops it",
+                               ov.slot, strStatusText(f), (unsigned)(f >> 16), (unsigned)((f >> 2) & 0x3FFF));
+                  }
+                  logf("residency at claim time: %d already loaded, %d loading, %d not loaded, %d marked do-not-delete",
+                       resident, pending, cold, pinned); }
             }
             if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
             InterlockedExchange(&g_idsReady, 1);
@@ -1905,7 +1938,7 @@ static void scanFinishSafe()
 
 static DWORD WINAPI BeatLoop(LPVOID)
 {
-    int beatOurs = 0, beatTheirs = 0;   // this beat: slots already ours vs slots someone re-took
+    int beatOurs = 0, beatTheirs = 0, beatLoaded = 0;   // ours / re-taken / resident right now
     scanFinishSafe();   // all user-file reads, optional scans and the budget decision, off the loader lock
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
@@ -1924,7 +1957,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
             // entries under us.
             if (!g_off && g_idsReady && g_mgr && g_mgr->entries) {
                 EnterCriticalSection(&g_cs);
-                beatOurs = beatTheirs = 0;
+                beatOurs = beatTheirs = beatLoaded = 0;
                 for (auto& ov : g_ovs) {
                     if (ov.handle && ov.id == 0xFFFFFFFF) {
                         uint32_t appeared = targetStreamingId(ov.slot);
@@ -1940,6 +1973,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
                     for (uint32_t which : { ov.id, ov.altId }) {
                         if (which >= (uint32_t)g_mgr->numEntries) continue;
                         StrEntry& e = g_mgr->entries[which];
+                        if ((e.flags & 3) == 1) ++beatLoaded;
                         if (e.handle == ov.handle) { ++beatOurs; continue; }
                         ++beatTheirs;
                         if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
@@ -1957,9 +1991,9 @@ static DWORD WINAPI BeatLoop(LPVOID)
                 budgetBeat();          // re-assert the raised texture budget (aligned data writes)
             }
         }
-        logf("alive (beat %d) — reg=%ld redirects=%ld lateBinds=%ld reclaims=%ld deferred=%ld slotsHeld=%d contested=%d baseRegistered=%s",
+        logf("alive (beat %d) — reg=%ld redirects=%ld lateBinds=%ld reclaims=%ld deferred=%ld slotsHeld=%d contested=%d inMemory=%d baseRegistered=%s",
              beat, (long)g_regTotal, (long)g_redirects, g_lateBinds, g_reclaims, g_deferred,
-             beatOurs, beatTheirs, g_didRegister ? "yes" : "no");
+             beatOurs, beatTheirs, beatLoaded, g_didRegister ? "yes" : "no");
     }
 }
 
