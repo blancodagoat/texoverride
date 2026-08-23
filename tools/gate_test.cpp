@@ -35,6 +35,12 @@ int main()
     ALLOW("mp_fm_skin_m_up_whi.ytd");
     ALLOW("mp_fm_faov_makeup_031.ytd");
 
+    // anim dictionaries at the root: exact name, .ycd only
+    ALLOW("mp_player_int_uppergang_sign_a.ycd");
+    ALLOW("agangsign2@animation.ycd");
+    ALLOW("amb@code_human_in_car_mp_actions@gang_sign_a@std@ds@base.ycd");
+    DENY("mp_m_freemode_01/uppr_000_r.ycd");   // a .ycd never belongs to a collection folder
+
     // still refused: everything that is not a ped
     DENY("adder/adder.ytd");                 // vehicle collection
     DENY("prop_bench_01a.ydd");              // prop model, no a_c_ name

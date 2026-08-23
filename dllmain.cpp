@@ -293,7 +293,8 @@ static bool hasExt(const std::string& k, const char* e)
 // folder walk can stop early on readmes, archives and loose textures.
 static bool isOverrideExt(const std::string& ln)
 {
-    return hasExt(ln, ".ytd") || hasExt(ln, ".ydd") || hasExt(ln, ".yft") || hasExt(ln, ".ymt");
+    return hasExt(ln, ".ytd") || hasExt(ln, ".ydd") || hasExt(ln, ".yft")
+        || hasExt(ln, ".ymt") || hasExt(ln, ".ycd");
 }
 // A key with a slash is a component slot ("collection/file") and its collection must be one of
 // the two families above.
@@ -344,6 +345,13 @@ static bool isAllowedKey(const std::string& key)
         return isPedComponentFile(key.substr(s + 1));
     }
     if (hasExt(key, ".ytd")) return true;
+    // .ycd: a clip dictionary, the file an animation lives in. Allowed at the root by
+    // exact name, same rule as a .ytd. Clips inside are looked up by joaat hash, not by
+    // the label CodeWalker prints, so a replacement dictionary only has to carry the
+    // right hashes. Worth having because a server streams its own anim dictionaries
+    // through this very call, and the re-assert loop is the only thing on the client
+    // that can take a slot back off one.
+    if (hasExt(key, ".ycd")) return true;
     if (hasExt(key, ".ymt")) return !isVanillaAnimalYmt(key);
     return lower(key).rfind("a_c_", 0) == 0
         && (hasExt(key, ".ydd") || hasExt(key, ".yft"));
@@ -382,7 +390,7 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
         // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
         if (!isAllowedKey(slotStr)) {
-            logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ymt, or .ydd/.yft named a_c_*", slotStr.c_str());
+            logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ymt, or .ydd/.yft named a_c_*", slotStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
@@ -965,7 +973,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         std::string key = lower(fwd(childRel));
         if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
         if (!isAllowedKey(key)) {
-            if (isNew && !quiet) logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ymt, or .ydd/.yft named a_c_*", key.c_str());
+            if (isNew && !quiet) logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ymt, or .ydd/.yft named a_c_*", key.c_str());
             continue;
         }
 
