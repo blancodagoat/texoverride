@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Less of the plugin's work now happens before the game is allowed to start. Reading the
+  crash-saver journal, listing your tex_overrides folder, reading the placement and budget files
+  and finding the game's optional internals all moved to the background thread. The only thing
+  that still has to happen first is installing the hook itself.
+
 ## 0.8.6 (2026-08-22)
 
 - If the plugin fails to install its hook, it now stops instead of carrying on. Before, a failed
