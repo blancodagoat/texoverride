@@ -5,19 +5,20 @@ Working notes for Claude on this repo. Everything load-bearing that is not obvio
 ## What this is
 
 A FiveM client ASI plugin (C++, MinHook) that draws the user's own `.ydd`/`.ytd` files on their
-ped. Files go in a `tex_overrides/` folder next to the plugin; the plugin registers them at the
-game's streaming layer, doing at runtime what a server `stream/` folder does. It never edits or
-re-encrypts game archives, sends nothing to the game server, and other players see no change.
+ped, and replaces weapon drawables and animation dictionaries at the streaming layer. Files go in
+a `tex_overrides/` folder next to the plugin; the plugin registers them at the game's streaming
+layer, doing at runtime what a server `stream/` folder does. It never edits or re-encrypts game
+archives, sends nothing to the game server, and other players see no change.
 
 It exists because FiveM's own client mod paths (mods/ folder, pseudo-DLC wrapping, caret naming)
 cannot deliver ped textures — they drain before the connect handshake, and the pseudo-DLC mount is
 non-overlay. This works at the streaming layer instead.
 
 Repo: github.com/blancodagoat/texoverride (owner blancodagoat). Single-file plugin: `dllmain.cpp`.
-Latest tag at time of writing: v0.8.6. Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx
+Latest tag at time of writing: v0.8.8. Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx
 signature a self-built ASI lacks; level 2 disables the ASI loader).
 
-## The three override mechanisms (all in dllmain.cpp)
+## The four override mechanisms (all in dllmain.cpp)
 
 1. **Clothing** — `tex_overrides/<collection>/<file>.ydd|.ytd`. The folder names a freemode-ped
    collection (see COLLECTIONS.md, 186 valid names). Registered under `collection/file` and
@@ -29,7 +30,14 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
    collection). No name whitelist: a scan of every overlay rpf found ~100 unrelated naming
    families plus arbitrary server packs, so the gate is type + exactness (`isAllowedKey`).
 
-3. **Tattoo placement** — `tex_overrides/<name>.xml` at the root (an edited copy of a pack's
+3. **Weapon drawables** — `tex_overrides/<name>.ydr` at the ROOT, no folder. The file name must
+   start with `w_`. Every GTA V weapon — base game and DLC — uses this prefix (w_pi_, w_ar_,
+   w_sg_, w_sr_, w_sm_, w_mg_, w_ex_, w_me_, w_lc_, etc.), and server-added weapons follow the
+   same convention. The prefix is what separates weapon drawables from vehicle parts, prop
+   drawables, building pieces and any other `.ydr` in the game. Texture dicts (`.ytd`) for weapons
+   go through mechanism 2 and already worked before 0.8.8.
+
+4. **Tattoo placement** — `tex_overrides/<name>.xml` at the root (an edited copy of a pack's
    `overlays.xml`). Moves/resizes/rotates tattoos by patching the parsed values inside the game's
    `PedDecorationManager`. Data writes only, no code touched. See "Placement solver" below.
 
@@ -42,7 +50,8 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
   what the folder list was really buying. Story/cutscene peds stay refused by prefix
   (`isBlockedCollection`: cs_ csb_ ig_ hc_ player_ non-freemode mp_ ...), so the README promise
   holds. Server peds seen in the field: canine, caninepd, caninesd, caninefd, blackcat, browncat.
-- Root files: `.ytd` only, exact-name. Placement `.xml`: fingerprint match required (below).
+- Root files: `.ytd` any name; `.ycd` any name; `.ydr` name must start with `w_`; `.ymt` any name
+  except the 8 vanilla animal names. Placement `.xml`: fingerprint match required (below).
 - The safety gate exists because filename-alone matching would cross-wire unrelated items. Keep it.
 - **`.ymt`: refused for the 8 vanilla animal names, allowed for everything else** (0.8.5).
   SETTLED, do not reopen. The mechanism is finally known: a `.ymt` whose name the game has NEVER

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.8 (2026-08-23)
+
+- Weapon models can be replaced now. Put a `.ydr` file named after the weapon (like
+  `w_pi_pistol.ydr`) straight into `tex_overrides` and the plugin claims that slot the same way it
+  claims a texture or animation. The file name has to start with `w_`, which is how every GTA V
+  weapon is named. Anything else, like a vehicle part or a prop, is still refused.
+- Weapon textures (`.ytd`) already worked before this. Nothing changed there.
+
 ## 0.8.7 (2026-08-23)
 
 - Animations can be replaced now. Put a `.ycd` file in `tex_overrides` and the plugin claims that
