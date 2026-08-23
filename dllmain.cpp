@@ -16,9 +16,10 @@
 // SAFETY: clothing folders may only name human freemode-ped collections (mp_m_freemode_01*,
 // mp_f_freemode_01*); anything else — animal peds, story/ambient peds, vehicles, weapons, props,
 // maps, scripts — is refused at load and skipped at runtime. Bare .ytd files at the root override
-// one texture dictionary by exact name (see isAllowedKey), and placement .xml files only ever
-// touch tattoo preset floats after a fingerprint match (see the placement section). It also logs
-// every distinct collection the server streams (tagged), so you can see what is in reach.
+// one texture dictionary by exact name, bare .ycd files replace one animation dictionary, bare
+// .ydr files named w_* replace one weapon drawable, and placement .xml files only ever touch
+// tattoo preset floats after a fingerprint match (see the placement section). It also logs every
+// distinct collection the server streams (tagged), so you can see what is in reach.
 //
 // v0.5.0 adds live reload: a watcher thread reacts when tex_overrides changes (event-driven, no
 // polling) — edited placement xml applies in-game within a second, new files register mid-session
@@ -219,7 +220,7 @@ static void logf(const char* fmt, ...)
     fputc('\n', f); fclose(f);
 }
 
-#define TEXOVERRIDE_VERSION "0.8.7"
+#define TEXOVERRIDE_VERSION "0.8.8"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
 static std::string fwd(std::string s)   { for (char& c : s) if (c=='\\') c='/'; return s; }
@@ -313,7 +314,7 @@ static bool hasExt(const std::string& k, const char* e)
 static bool isOverrideExt(const std::string& ln)
 {
     return hasExt(ln, ".ytd") || hasExt(ln, ".ydd") || hasExt(ln, ".yft")
-        || hasExt(ln, ".ymt") || hasExt(ln, ".ycd");
+        || hasExt(ln, ".ymt") || hasExt(ln, ".ycd") || hasExt(ln, ".ydr");
 }
 // A key with a slash is a component slot ("collection/file") and its collection must be one of
 // the two families above.
@@ -371,6 +372,11 @@ static bool isAllowedKey(const std::string& key)
     // through this very call, and the re-assert loop is the only thing on the client
     // that can take a slot back off one.
     if (hasExt(key, ".ycd")) return true;
+    // .ydr: a weapon drawable. Every GTA V weapon — base game and DLC — uses the w_
+    // prefix (w_pi_pistol, w_ar_assaultrifle, w_sg_pumpshotgun, etc.), and server-added
+    // weapons follow the same convention. That prefix is what separates weapon drawables
+    // from vehicle parts, props, building pieces and every other .ydr in the game.
+    if (hasExt(key, ".ydr")) return lower(key).rfind("w_", 0) == 0;
     if (hasExt(key, ".ymt")) return !isVanillaAnimalYmt(key);
     return lower(key).rfind("a_c_", 0) == 0
         && (hasExt(key, ".ydd") || hasExt(key, ".yft"));
@@ -409,7 +415,7 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
         // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
         if (!isAllowedKey(slotStr)) {
-            logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ymt, or .ydd/.yft named a_c_*", slotStr.c_str());
+            logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ydr named w_*, .ymt, or .ydd/.yft named a_c_*", slotStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
@@ -1187,7 +1193,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         std::string key = lower(fwd(childRel));
         if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
         if (!isAllowedKey(key)) {
-            if (isNew && !quiet) logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ymt, or .ydd/.yft named a_c_*", key.c_str());
+            if (isNew && !quiet) logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ydr named w_*, .ymt, or .ydd/.yft named a_c_*", key.c_str());
             continue;
         }
 
@@ -1427,12 +1433,13 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             InterlockedExchange(&g_idsReady, 1);
         }
 
-        // MAP: record each distinct collection the server streams, tagged with whether we'd ever touch it
+        // MAP: record each distinct collection the server streams that is overridable
         std::string keyLower = lower(asName);
-        std::string coll = collectionOf(keyLower);
-        if (g_collSeen.insert(coll).second && g_collSeen.size() <= 500)
-            logf("collection: %-40s [%s]", coll.c_str(),
-                 isAllowedKey(keyLower) ? "overridable" : "OTHER - never touched");
+        if (isAllowedKey(keyLower)) {
+            std::string coll = collectionOf(keyLower);
+            if (g_collSeen.insert(coll).second)
+                logf("collection: %-40s [overridable]", coll.c_str());
+        }
 
         LeaveCriticalSection(&g_cs);
     }

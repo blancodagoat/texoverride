@@ -1,6 +1,6 @@
 # texoverride
 
-texoverride changes how clothes, tattoos and other textures look in GTA V on FiveM. Only you see
+texoverride changes how clothes, tattoos, weapons and other textures look in GTA V on FiveM. Only you see
 the change. You put files in one folder, and the game shows your versions instead of the
 originals. It never edits the game's own files, and it never sends anything to the server.
 
@@ -263,6 +263,27 @@ Two more things worth knowing:
 - **Clip names are matched by number, not by spelling.** Tools sometimes show a clip under a label
   left over from whoever built it while the name the game actually uses is different. If a pack
   looks wrongly named and still works, that is why.
+
+## Replacing firearms
+
+A weapon mod usually comes with two files: a `.ydr` (the 3D model) and a `.ytd` (the textures).
+Put both straight into `tex_overrides`, no folder:
+
+```
+tex_overrides/
+  w_pi_pistol.ydr          <- weapon model
+  w_pi_pistol.ytd          <- weapon textures
+```
+
+The file name has to start with `w_`. That is the naming convention every GTA V weapon follows,
+and it is what stops vehicle parts, props and other `.ydr` files from being loaded by mistake.
+
+Texture-only mods (`.ytd` only, no model change) have always worked. Nothing new is needed for
+those.
+
+The same server-streams-it rule applies here as it does for animations: a vanilla GTA weapon
+goes through the same streaming call the plugin listens on, so those *can* be replaced. If the
+log shows the slot marked `[overridable]`, it works.
 
 ## Changing files while the game runs
 
