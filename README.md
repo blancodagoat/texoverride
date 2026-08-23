@@ -40,49 +40,73 @@ The plugin only works on servers that allow plugins. Some servers block them wit
 
 ## Replacing clothes
 
-Every clothing item in the game belongs to a named group. The game calls this group a
-*collection*. To replace an item, make a folder with the collection's exact name and put your file
-inside it:
+Clothes go in a folder. Which folder depends on where the item came from.
+
+**Step 1. Open `tex_overrides` and find the folder for your character.**
 
 ```
-plugins/
-  texoverride.asi
-  tex_overrides/
-    mp_m_freemode_01/                     <- male character, base game clothes
-      teef_004_u.ydd
-      teef_diff_004_a_uni.ytd
-    mp_f_freemode_01/                     <- female character, base game clothes
-      lowr_000_r.ydd
-    mp_m_freemode_01_mp_m_gunrunning_01/  <- male, Gunrunning DLC clothes
-      teef_012_u.ydd
+mp_m_freemode_01      male character
+mp_f_freemode_01      female character
 ```
 
-A `.ydd` file is a 3D model. A `.ytd` file holds the textures, which are the images painted on
-the model.
+Those two cover almost everything you will ever change. The download comes with a folder already
+made for every name there is, so you never have to make one or guess a spelling.
 
-The folder name has to match the collection exactly. [COLLECTIONS.md](COLLECTIONS.md) lists every
+If your mod came from a game update, its readme names a longer folder, something like
+`mp_m_freemode_01_mp_m_gunrunning_01`. If it names one, use that folder instead of the short one.
+If it names nothing, use the short one.
+
+**Step 2. Grab the files out of the mod and drop them in that folder.**
+
+```
+tex_overrides/
+  mp_m_freemode_01/
+    uppr_012_r.ydd              <- the shape of the item
+    uppr_diff_012_a_uni.ytd     <- the picture painted on it
+```
+
+A `.ydd` file is a 3D model. A `.ytd` file holds the textures, which are the images painted on the
+model. Some mods only give you one of the two. That is fine, drop in what you have.
+
+**Step 3. Start FiveM.** That is the whole job.
+
+### Which item does it change?
+
+The file name, and nothing else. `uppr_012_r.ydd` replaces whatever `uppr_012_r` already was. You
+do not pick a slot or type a number anywhere. Leave the names exactly as the mod ships them.
+
+The names are how the game labels body parts, not something the mod made up. `uppr` is a top,
+`lowr` is trousers, `feet` is shoes, and so on.
+
+### If you do not know which folder to use
+
+The game calls each of these folders a *collection*. [COLLECTIONS.md](COLLECTIONS.md) lists every
 name that came with the game, and `docs/ped_collections.tsv` has all 469 of them with file counts.
 
-Your server can add its own characters and animals too, with names that are in neither list. Those
-work: name the folder after the model. What the plugin checks instead is the files inside. They
-have to be named the way GTA names body parts, like `head_000_r.ydd` or `uppr_diff_001_a_uni.ytd`.
-That is what stops a vehicle texture or a map file being loaded onto somebody, which is the reason
-the rule exists. Story characters are still refused outright, as are vehicles, props and maps.
+Easier still: start the game once and read the log. It lists every collection the server actually
+uses and marks whether the plugin can reach it.
 
-If you do not know which collection an item belongs to, start the game once and read the log. It
-lists every collection the server uses and marks whether the plugin can reach it.
+### Server characters and pets
+
+Servers add their own characters and animals with names that are in neither list. Those work too.
+Name the folder after the model and put the parts in it.
+
+What the plugin checks is not the folder name but the files inside. They have to be named the way
+GTA names body parts, like `head_000_r.ydd` or `uppr_diff_001_a_uni.ytd`. That is what stops a
+vehicle texture or a map file being loaded onto somebody, which is the reason the rule exists.
+Story characters are refused outright, as are vehicles, props and maps.
 
 ## Replacing animals
 
-Eight animals are built exactly like your own character, out of a folder of parts:
+Eight animals are built like your own character, out of a folder of parts:
 
 ```
 a_c_chop  a_c_husky  a_c_mtlion  a_c_panther
 a_c_retriever  a_c_rottweiler  a_c_sharktiger  a_c_shepherd
 ```
 
-Most animal mods you download are already laid out the way this plugin wants. Drop the folder
-straight into `tex_overrides`:
+**Step 1. Drop the animal's folder straight into `tex_overrides`.** Most animal mods are already
+laid out the way the plugin wants:
 
 ```
 tex_overrides\a_c_shepherd\head_000_r.ydd
@@ -90,77 +114,105 @@ tex_overrides\a_c_shepherd\head_diff_000_a_whi.ytd
 tex_overrides\a_c_shepherd\uppr_000_u.ydd
 ```
 
-Mods usually also come with two loose files, `a_c_shepherd.yft` and `a_c_shepherd.ymt`. **Those go
-in `tex_overrides` itself, not inside the animal's folder.** Do not skip the `.ymt`. It is the file
-that tells the game which parts and which textures exist, so without it anything the mod added on
-top of the original animal cannot be picked, and the mod looks half finished.
+**Step 2. Any loose files go in the top of `tex_overrides`, not in the animal's folder.**
+
+```
+tex_overrides\a_c_shepherd.yft
+```
+
+**Step 3. Start FiveM.**
 
 Every other animal (pug, poodle, westy, cat, coyote, deer, cow, pig, rabbit, rat, and the birds
 and fish) is one single model instead of a folder of parts. Those have no folder at all. Put
 `a_c_<name>.ydd`, `.ytd`, `.yft` and `.ymt` straight into `tex_overrides`.
 
-One thing to know first: a model built on a different skeleton than the original animal will not
-work, because the skeleton lives in a part of the game files this plugin cannot reach. Retextures
-and remodels that keep the original skeleton are fine, and that is what nearly every animal mod
-is.
+### About the `.ymt` file
+
+Animal mods usually ship one, for example `a_c_shepherd.ymt`. **For those eight animals it is
+turned away on purpose.** The game already owns that exact name, and the call that would replace
+it crashes the game outright, so there is nothing to be done about it. Drop it in if you like. The
+log says it was ignored and the rest of the mod still loads.
+
+What you lose is only the parts the mod *added* on top of the original animal. Those stay
+unselectable. Anything the mod replaced still shows up. For every other animal the `.ymt` works
+normally, so leave it in.
+
+### One thing to check first
+
+A model built on a different skeleton than the original animal will not work, because the skeleton
+lives in a part of the game files this plugin cannot reach. Retextures and remodels that keep the
+original skeleton are fine, and that is what nearly every animal mod is.
 
 ## Replacing tattoos, skin and other overlays
 
-Tattoos, skin textures, face paint, beards and similar body textures do not belong to any
-collection. Each one is a single `.ytd` file with its own unique name. To replace one, put your
-`.ytd` straight into `tex_overrides`, without any folder:
+Tattoos, skin textures, face paint and beards do not go in a folder at all.
+
+**Step 1. Drop the file straight into `tex_overrides`, next to the folders.**
 
 ```
-  tex_overrides/
-    mp_gr_tat_027_m.ytd          <- a tattoo
-    mp_fm_skin_m_up_whi.ytd      <- a skin texture
+tex_overrides/
+  mp_gr_tat_027_m.ytd          <- a tattoo
+  mp_fm_skin_m_up_whi.ytd      <- a skin texture
 ```
+
+These are always one single `.ytd` file. There is no `.ydd` for a tattoo, and a `.ydd` outside a
+folder is never accepted.
+
+**Step 2. Start FiveM.**
+
+### Which tattoo does it change?
 
 The file name is the whole match. Your file replaces the one texture with that exact name and
-nothing else. Custom server tattoo packs work the same way, so any name is accepted here. Model
-files (`.ydd`) are never accepted outside a folder.
+nothing else. Custom server tattoo packs work the same way, so any name is accepted here.
 
-To find the right file name for a tattoo, open
-[docs/overlay_index.tsv](docs/overlay_index.tsv) in a spreadsheet app or a text editor and search
-for the tattoo. The `txd` column is the file name to use.
+To find the name to use, open [docs/overlay_index.tsv](docs/overlay_index.tsv) in a spreadsheet app
+or a text editor and search for the tattoo. The `txd` column is the file name.
 
 ## Moving tattoos (position, size, rotation)
 
-The texture does not decide where a tattoo sits on the body. That comes from numbers in a game
-file called `overlays.xml`. The plugin can change those numbers for you. Three steps:
+Where a tattoo sits on the body, and how big it is, is not in the picture. It is a set of numbers
+in a game file called `overlays.xml`. The plugin can change those numbers for you.
 
-1. **Find the file that owns your tattoo.** Look the tattoo up in
-   [docs/overlay_index.tsv](docs/overlay_index.tsv). The `source` column names the exact
-   `overlays.xml` inside the game files. The other columns show the tattoo's current position
-   (`uvX`, `uvY`), size (`scaleX`, `scaleY`) and rotation.
-2. **Copy that file out and edit it.** Use [OpenIV](https://openiv.com/) to open the path from the
-   `source` column and save the `.xml` to your computer. Open it in any text editor and find your
-   tattoo by name. Change its numbers: `uvPos` is the position, `scale` is the size, `rotation` is
-   the angle. Only change the tattoos you want moved. Leave the rest of the file alone.
-3. **Put the edited `.xml` into `tex_overrides`**, next to your `.ytd` files, and start the game.
+This one is fiddly. You have to dig a file out of the game and edit it by hand.
 
-One file to leave alone: `shop_tattoo.meta`, which sits next to `overlays.xml` in the game files.
-It is the shop catalog (price, menu label, unlock, and which shop slot points to which tattoo),
-not the tattoo's looks or position. A useful thing to know: the game's own reader for that file
-has no field for `zone`, so a `<zone>` line inside `shop_tattoo.meta` is thrown away on load. The
-zone that actually places a tattoo, along with its size, angle and texture, lives in the `.ytd`
-and the `overlays.xml`. So when you replace or move a tattoo, nothing in `shop_tattoo.meta` needs
-to change, and the plugin does not apply it; if you drop one in anywhere, the log says it was
-ignored. If you keep it for your own reference, put it in a folder named after its pack
-(`tex_overrides/mplowrider/shop_tattoo.meta`), matching the game's own layout.
+**Step 1. Find the file that owns your tattoo.** Look the tattoo up in
+[docs/overlay_index.tsv](docs/overlay_index.tsv). The `source` column names the exact
+`overlays.xml` inside the game files. The other columns show the tattoo's current position
+(`uvX`, `uvY`), size (`scaleX`, `scaleY`) and rotation.
+
+**Step 2. Copy that file out and edit it.** Use [OpenIV](https://openiv.com/) to open the path from
+the `source` column and save the `.xml` to your computer. Open it in any text editor and find your
+tattoo by name. `uvPos` is the position, `scale` is the size, `rotation` is the angle.
+
+**Change only the tattoos you want moved. Leave the rest of the file alone.** That is not
+politeness, it is required. Before changing anything in the running game the plugin checks the
+entries you did not touch against the game, to be sure it has the right file. If nearly every entry
+is changed there is nothing left to check against, and the file is skipped.
+
+**Step 3. Put the edited `.xml` into `tex_overrides`**, next to your `.ytd` files, and start the
+game. If the file does not line up, because it is the wrong one or the game has updated, nothing is
+changed and the log says so.
+
+### One file to leave alone
+
+`shop_tattoo.meta` sits next to `overlays.xml` in the game files. It is the shop catalog (price,
+menu label, unlock, and which shop slot points to which tattoo), not the tattoo's looks or
+position. The plugin does not apply it, and if you drop one in anywhere the log says it was
+ignored.
+
+A useful thing to know: the game's own reader for that file has no field for `zone`, so a `<zone>`
+line inside `shop_tattoo.meta` is thrown away on load. The zone that actually places a tattoo,
+along with its size, angle and texture, lives in the `.ytd` and the `overlays.xml`. So when you
+replace or move a tattoo, nothing in `shop_tattoo.meta` needs to change. If you keep it for your
+own reference, put it in a folder named after its pack (`tex_overrides/mplowrider/shop_tattoo.meta`),
+matching the game's own layout.
 
 A note on why that file has no pack name in it: the game connects each `shop_tattoo.meta` to its
-DLC through the DLC's own content list (`content.xml`), not through the file name. That is also
-the answer for *adding* whole new tattoos, where a shop entry does matter: a new tattoo needs its
-texture, overlay entry and shop entry loaded together as a pack. FiveM loads such packs client
-side as mod packages in `FiveM.app\mods` (this is how server tattoo packs are built). texoverride
-stays out of that; it replaces and moves what exists.
-
-The plugin is careful with these files. Before changing anything in the running game, it checks
-that the entries you did not touch still match the game exactly. If they do not line up, because
-it is the wrong file or the game has updated, it changes nothing and says so in the log. This
-check is also why you should leave most of the file unedited. If nearly every entry is changed,
-there is nothing left to check against, and the plugin skips the file.
+DLC through the DLC's own content list (`content.xml`), not through the file name. That is also the
+answer for *adding* whole new tattoos, where a shop entry does matter: a new tattoo needs its
+texture, overlay entry and shop entry loaded together as a pack. FiveM loads such packs client side
+as mod packages in `FiveM.app\mods` (this is how server tattoo packs are built). texoverride stays
+out of that; it replaces and moves what exists.
 
 ## Replacing animations
 
