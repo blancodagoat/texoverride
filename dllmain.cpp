@@ -757,23 +757,59 @@ static uint32_t findModuleSlotSafe(void* module, const char* stem, int build)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0xFFFFFFFF; }
 }
 
-static uint32_t targetStreamingId(const char* slot)
+// Why a name lookup did not produce a slot. A whole file type failing looks identical to a single
+// missing name unless the reason is carried out, and that cost a session of guessing once.
+enum SlotWhy { SLOT_OK = 0, SLOT_NO_EXPORTS, SLOT_BAD_NAME, SLOT_NO_MANAGER, SLOT_NO_MODULE, SLOT_NO_NAME };
+static const char* slotWhyText(int w)
 {
-    if (!slot || !g_getStreamingManagerFn || !g_getStreamingModuleFn) return 0xFFFFFFFF;
+    switch (w) {
+    case SLOT_OK:         return "ok";
+    case SLOT_NO_EXPORTS: return "FiveM's streaming exports are missing, so no name can be looked up";
+    case SLOT_BAD_NAME:   return "the key has no usable extension";
+    case SLOT_NO_MANAGER: return "the streaming manager came back null";
+    case SLOT_NO_MODULE:  return "the game has no streaming module for this file type";
+    default:              return "the module does not know that name";
+    }
+}
+
+// Reported once per file type, so "every .ycd failed" is one line instead of silence.
+static std::unordered_map<std::string, int> g_slotWhyByExt;
+
+static uint32_t targetStreamingId(const char* slot, int* why = nullptr)
+{
+    auto fail = [&](int w) { if (why) *why = w; return 0xFFFFFFFFu; };
+    if (!slot) return fail(SLOT_BAD_NAME);
+    if (!g_getStreamingManagerFn || !g_getStreamingModuleFn) return fail(SLOT_NO_EXPORTS);
     const char* file = strrchr(slot, '/');
     file = file ? file + 1 : slot;
     const char* dot = strrchr(file, '.');
-    if (!dot || dot == file || !dot[1]) return 0xFFFFFFFF;
+    if (!dot || dot == file || !dot[1]) return fail(SLOT_BAD_NAME);
     try {
         std::string stem(file, (size_t)(dot - file));
         std::string extension(dot + 1);
         void* manager = g_getStreamingManagerFn();
-        if (!manager) return 0xFFFFFFFF;
+        if (!manager) return fail(SLOT_NO_MANAGER);
         // streaming::Manager::moduleMgr is at 0x1B8 in FiveM's exported Streaming.h layout.
         void* module = g_getStreamingModuleFn((uint8_t*)manager + 0x1B8, extension.c_str());
-        return findModuleSlotSafe(module, stem.c_str(), runningGameBuild());
+        if (!module) return fail(SLOT_NO_MODULE);
+        uint32_t id = findModuleSlotSafe(module, stem.c_str(), runningGameBuild());
+        if (id == 0xFFFFFFFF) return fail(SLOT_NO_NAME);
+        if (why) *why = SLOT_OK;
+        return id;
     }
-    catch (...) { return 0xFFFFFFFF; }
+    catch (...) { return fail(SLOT_NO_MANAGER); }
+}
+
+// Record the outcome for this file type, and say it out loud the first time it is seen.
+static void noteSlotWhy(const char* slot, int why)
+{
+    const char* dot = strrchr(slot, '.');
+    if (!dot || !dot[1]) return;
+    std::string ext = lower(dot + 1);
+    auto it = g_slotWhyByExt.find(ext);
+    if (it != g_slotWhyByExt.end() && it->second == why) return;
+    g_slotWhyByExt[ext] = why;
+    logf("slot lookup for .%s: %s", ext.c_str(), slotWhyText(why));
 }
 
 static bool localRawHandle(const char* file, uint32_t* handle)
@@ -1286,7 +1322,9 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                     // seven scattered vanilla dictionaries came back with seven CONSECUTIVE
                     // ids, which existing indices could never be). So ask the store what the
                     // name really resolves to, and pin that entry as well.
-                    uint32_t tgt = targetStreamingId(ov.slot);
+                    int why = SLOT_OK;
+                    uint32_t tgt = targetStreamingId(ov.slot, &why);
+                    noteSlotWhy(ov.slot, why);
                     if (validStreamingId(tgt) && tgt != id) { ov.altId = tgt; ++aliased; }
                 }
                 else {
@@ -1313,6 +1351,45 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             logf("claimed %d base-slot override(s): %d direct, %d occupied-slot takeover, %d waiting for target, %d rejected",
                  direct + takeovers + waiting, direct, takeovers, waiting, rejected);
             if (aliased) logf("%d of those named a slot the game already owned under a different id; the plugin pins both", aliased);
+
+            // Per type, uncapped. The per-file lines stop at 60, so on a big pack a whole file
+            // type can fail without one line of its own ever being printed.
+            { std::unordered_map<std::string, int> byExt, aliasByExt, deadByExt;
+              for (auto& ov : g_ovs) {
+                  const char* dot = strrchr(ov.slot, '.');
+                  std::string ext = dot && dot[1] ? lower(dot + 1) : std::string("(none)");
+                  ++byExt[ext];
+                  if (ov.altId != 0xFFFFFFFF) ++aliasByExt[ext];
+                  if (ov.id == 0xFFFFFFFF && ov.altId == 0xFFFFFFFF) ++deadByExt[ext];
+              }
+              for (auto& kv : byExt)
+                  logf("  .%-4s %4d file(s), %d also pinned under the name's own id, %d with no slot at all",
+                       kv.first.c_str(), kv.second, aliasByExt[kv.first], deadByExt[kv.first]); }
+
+            // Read the pool back. A claim can report success and leave the entry pointing at the
+            // game's own file, which every other line in this log would call healthy.
+            if (g_mgr && g_mgr->entries) {
+                int pointing = 0, elsewhere = 0, nohandle = 0, shownBad = 0;
+                for (auto& ov : g_ovs) {
+                    if (!ov.handle) { ++nohandle; continue; }
+                    bool any = false, all = true;
+                    for (uint32_t which : { ov.id, ov.altId }) {
+                        if (which >= (uint32_t)g_mgr->numEntries) continue;
+                        any = true;
+                        if (g_mgr->entries[which].handle != ov.handle) all = false;
+                    }
+                    if (!any) { ++nohandle; continue; }
+                    if (all) ++pointing;
+                    else {
+                        ++elsewhere;
+                        if (++shownBad <= 10)
+                            logf("  NOT OURS YET  %s (id=%u alt=%u ours=%08x, pool holds %08x)", ov.slot, ov.id, ov.altId,
+                                 ov.handle, g_mgr->entries[ov.id < (uint32_t)g_mgr->numEntries ? ov.id : 0].handle);
+                    }
+                }
+                logf("verify: %d slot(s) now point at your file, %d still point at the game's, %d got no handle. The beat re-asserts the second group once a second.",
+                     pointing, elsewhere, nohandle);
+            }
             if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
             InterlockedExchange(&g_idsReady, 1);
         }
@@ -1828,6 +1905,7 @@ static void scanFinishSafe()
 
 static DWORD WINAPI BeatLoop(LPVOID)
 {
+    int beatOurs = 0, beatTheirs = 0;   // this beat: slots already ours vs slots someone re-took
     scanFinishSafe();   // all user-file reads, optional scans and the budget decision, off the loader lock
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
@@ -1846,6 +1924,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
             // entries under us.
             if (!g_off && g_idsReady && g_mgr && g_mgr->entries) {
                 EnterCriticalSection(&g_cs);
+                beatOurs = beatTheirs = 0;
                 for (auto& ov : g_ovs) {
                     if (ov.handle && ov.id == 0xFFFFFFFF) {
                         uint32_t appeared = targetStreamingId(ov.slot);
@@ -1861,7 +1940,8 @@ static DWORD WINAPI BeatLoop(LPVOID)
                     for (uint32_t which : { ov.id, ov.altId }) {
                         if (which >= (uint32_t)g_mgr->numEntries) continue;
                         StrEntry& e = g_mgr->entries[which];
-                        if (e.handle == ov.handle) continue;
+                        if (e.handle == ov.handle) { ++beatOurs; continue; }
+                        ++beatTheirs;
                         if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
                         uint32_t old = e.handle;
                         e.handle = ov.handle;
@@ -1877,9 +1957,9 @@ static DWORD WINAPI BeatLoop(LPVOID)
                 budgetBeat();          // re-assert the raised texture budget (aligned data writes)
             }
         }
-        logf("alive (beat %d) — reg=%ld redirects=%ld lateBinds=%ld reclaims=%ld deferred=%ld baseRegistered=%s",
+        logf("alive (beat %d) — reg=%ld redirects=%ld lateBinds=%ld reclaims=%ld deferred=%ld slotsHeld=%d contested=%d baseRegistered=%s",
              beat, (long)g_regTotal, (long)g_redirects, g_lateBinds, g_reclaims, g_deferred,
-             g_didRegister ? "yes" : "no");
+             beatOurs, beatTheirs, g_didRegister ? "yes" : "no");
     }
 }
 
