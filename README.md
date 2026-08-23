@@ -165,29 +165,52 @@ there is nothing left to check against, and the plugin skips the file.
 ## Replacing animations
 
 An animation lives in a `.ycd` file, which the game calls a clip dictionary. One file holds one or
-more clips, and a menu asks for them by dictionary name plus clip name. To replace one, put your
-`.ycd` straight into `tex_overrides`, no folder:
+more clips, and whatever plays an animation asks for it by dictionary name plus clip name. To
+replace one, put your `.ycd` straight into `tex_overrides`, no folder:
 
 ```
   tex_overrides/
-    mp_player_int_uppergang_sign_a.ycd
+    gtawpl_1.ycd
 ```
 
-The file name has to be the dictionary name, exactly. The clip names inside matter just as much:
-the game looks them up by name, so your file has to contain a clip called what the menu asks for,
-or the menu asks for something that is not there and nothing plays.
+**Read this part before you build anything, it decides whether your pack can work at all.**
 
-Two things worth knowing before you start:
+The plugin can replace an animation the **server** streams. It cannot replace one that came with
+GTA. Those are two different things and they look identical from the outside:
+
+| where the animation comes from | can the plugin replace it |
+|---|---|
+| your server streams it (it appears in the log) | yes |
+| it shipped with GTA | no |
+
+The reason is how each one reaches the game. A server file is registered through the same call the
+plugin listens on, so the plugin swaps the path as it goes past. A file that came with GTA never
+makes that call, so there is nothing to swap. Clothes and textures are different, and the plugin
+does reach the base game for those.
+
+So the first thing to do is start the game once and read the log. Every dictionary the server
+streams is listed:
+
+```
+collection: gtawpl_1.ycd                      [overridable]
+collection: agangsign2@animation.ycd          [overridable]
+```
+
+If the dictionary your animation uses is in that list, you can replace it. If it is not, the
+animation came with GTA and this will not work no matter how the file is built.
+
+Then get the clip name right. The file name has to be the dictionary name exactly, and the file has
+to contain a clip called what is being asked for. Many servers publish a list of their animations
+with the dictionary and clip for each one, and that is the easiest way to get both.
+
+Two more things worth knowing:
 
 - **Replacing a dictionary replaces all of it.** If the original held three clips and yours holds
-  one, the other two are gone, and anything that played them stops working. Copy the original,
-  swap the clip you want changed, and keep the rest.
-- **Names are matched by number, not by spelling.** Tools sometimes show a clip under a label from
-  whoever built it while the actual name underneath is the right one. If a pack looks wrongly named
-  but works, that is why.
-
-To find which dictionary and clip a server emote uses, ask the server. Many publish the list. The
-log also names every dictionary the server streams, so you can check a name is spelled right.
+  one, the other two are gone, and anything that played them stops working. Start from a copy of a
+  dictionary that already has the right clips, swap the one you want changed, keep the rest.
+- **Clip names are matched by number, not by spelling.** Tools sometimes show a clip under a label
+  left over from whoever built it while the name the game actually uses is different. If a pack
+  looks wrongly named and still works, that is why.
 
 ## Changing files while the game runs
 
