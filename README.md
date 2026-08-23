@@ -244,8 +244,8 @@ So the first thing to do is start the game once and read the log. Every dictiona
 streams is listed:
 
 ```
-file:       gtawpl_1.ycd                      [overridable]
-file:       agangsign2@animation.ycd          [overridable]
+[19:04:22] [INFO] [COLLECTION] Server file:       gtawpl_1.ycd              [overridable...]
+[19:04:22] [INFO] [COLLECTION] Server file:       agangsign2@animation.ycd  [overridable...]
 ```
 
 If the dictionary your animation uses is in that list, you can replace it. If it is not, the
@@ -393,38 +393,61 @@ Everything the plugin does is written to `plugins/texoverride.log`. The file sta
 launch, and the previous session's log is kept next to it as `texoverride.log.old`, so if the game
 crashed, the log from the crashed session is still there.
 
+Every line has the same shape:
+
+```
+[19:04:22] [INFO] [CLAIM] REDIRECT mp_m_freemode_01/uppr_012_r.ydd -> tex_overrides/...
+```
+
+The level is `INFO`, `WARN` or `ERROR`. If something did not work, search the file for `WARN` and
+`ERROR` first, because those two carry the reason. The category says which part of the plugin
+spoke: `CORE`, `SCAN`, `COLLECTION`, `AUDIT`, `CLAIM`, `VERIFY`, `LIVE`, `TATTOO` or `UPDATE`.
+
+There is a fourth level, `DEBUG`, which is off unless you make an empty file called `_debug.txt`
+inside `tex_overrides`. It adds internal detail that is only useful when someone is helping you
+work out a problem.
+
 | Line | What it means |
 |---|---|
-| `texoverride x.y.z loaded (date)` | The plugin is in and running |
-| `loaded N override(s)` | Your files were found |
-| indented `collection N file(s)` lines | How your files were grouped |
-| `pack cost when fully loaded: ...` | What your files cost the game in memory |
+| `texoverride x.y.z ...` | The plugin is in and running |
+| `Loaded N override(s) in Ns` | Your files were found |
+| indented `Collections` and `Root Assets` lines | How your files were grouped |
+| `Pack cost when fully loaded: ...` | What your files cost the game in memory |
 | `HEAVY x MB file` | That file is oversized; shrink it to avoid texture loss |
-| `HUGE file, x MB` | Over 32 MB; it is loaded, but shrink it first if you start crashing |
+| `HUGE file - x MB` | Over 32 MB; it is loaded, but shrink it first if you start crashing |
+| `UNREADABLE file` | The file could not be opened, so it was not loaded |
+| `SKIP file` | The name does not fit any rule; the reason is on the line |
+| `IGNORED file` | Not a type the game can be handed this way; the reason is on the line |
 | `CRASH SAVER: ...` | Last run died on a file; it is skipped this launch so you can get in |
 | `QUARANTINED file` | Skipped after a crash; delete `_quarantine.txt` to try it again |
-| `IGNORED file` | Not a type the game can be handed this way; the reason is on the line |
-| `budget: sized to this PC ...` | The texture budget was raised to fit your card |
-| `texture budget: a -> b GB` | The raise was written into the game |
-| `placement: collection ... N preset(s)` | Your edited `.xml` was read |
-| `placement: ... layout solved` | The `.xml` matched the game; changes can be applied |
-| `streaming manager @ ...` | Internal: found what it needs to keep overrides in place |
+| `Texture budget: Sized to this PC ...` | The texture budget was raised to fit your card |
+| `Texture budget: a -> b GB` | The raise was written into the game |
+| `Loaded placement file: ...` | Your edited `.xml` was read |
+| `... layout solved` | The `.xml` matched the game; changes can be applied |
+| `Streaming manager @ ...` | Internal: found what it needs to keep overrides in place |
 | `registerRawStreamingFile @ ...` | Internal: found the function it works through |
 | `MH_EnableHook: MH_OK` | Internal: ready |
-| `OVERRIDE-REG slot <- file` | Your file took over that item |
-| `OVERRIDE-REG ... pinning both` | The game had that name under a second id; the plugin holds both |
-| `OVERRIDE-TAKEOVER slot <- file` | The slot already existed, so its handle was replaced with the local raw handle |
-| `OVERRIDE-WAIT slot <- file` | The local file is ready and will bind when its target slot appears |
-| `OVERRIDE-FAILED slot <- file` | Registration failed and produced no usable local raw entry |
-| `LATE-BIND slot ...` | A previously missing target appeared and was attached |
-| `RECLAIM slot (old -> ours)` | The game tried to take an item back; the plugin re-took it |
+| `OVERRIDE-REG: slot <- file` | Your file took over that item |
+| `OVERRIDE-TAKEOVER: slot <- file` | The slot already existed, so its handle was replaced |
+| `OVERRIDE-WAIT: slot <- file` | The file is ready and will bind when its target slot appears |
+| `OVERRIDE-FAILED: slot <- file` | Registration failed and produced no usable entry |
+| `LATE-BIND: slot ...` | A previously missing target appeared and was attached |
+| `RECLAIM: slot (old -> ours)` | The game tried to take an item back; the plugin re-took it |
 | `REDIRECT name -> file` | A server file was swapped for yours |
-| `PLACEMENT ...` | A tattoo position change was applied |
-| `collection: name [tag]` | A collection the server uses, and whether it is reachable |
-| `file:       name [tag]` | A loose file the server streams, and whether it is reachable |
-| `update check: ...` | Whether you have the newest version |
-| `alive (beat N) ...` | Heartbeat; the plugin is still running |
+| `PLACEMENT: ...` | A tattoo position change was applied |
+| `LIVE-ADD` / `LIVE-TAKEOVER` / `LIVE-UPDATE` | A file you changed while playing was picked up |
+| `Server collection: name kind [tag]` | A collection the server uses, what it is, and whether it is reachable |
+| `Server file: name [tag]` | A loose file the server streams, and whether it is reachable |
+| `Update available` / `Plugin is up to date` | Whether you have the newest version |
+| `Heartbeat (beat N) ...` | The plugin is still running |
 | `pattern NOT FOUND` | The game updated; the plugin needs an update |
+
+The three tags on a `Server collection` line mean:
+
+- `overridable`, make a folder with that name and your files will be used.
+- `depends on the file names inside`, the collection itself is fine, but each file still has to be
+  named the way GTA names ped parts.
+- `OTHER - never touched`, a story or ambient character. The plugin refuses these on purpose.
 
 ## How it works
 
