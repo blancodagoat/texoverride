@@ -162,6 +162,33 @@ it is the wrong file or the game has updated, it changes nothing and says so in 
 check is also why you should leave most of the file unedited. If nearly every entry is changed,
 there is nothing left to check against, and the plugin skips the file.
 
+## Replacing animations
+
+An animation lives in a `.ycd` file, which the game calls a clip dictionary. One file holds one or
+more clips, and a menu asks for them by dictionary name plus clip name. To replace one, put your
+`.ycd` straight into `tex_overrides`, no folder:
+
+```
+  tex_overrides/
+    mp_player_int_uppergang_sign_a.ycd
+```
+
+The file name has to be the dictionary name, exactly. The clip names inside matter just as much:
+the game looks them up by name, so your file has to contain a clip called what the menu asks for,
+or the menu asks for something that is not there and nothing plays.
+
+Two things worth knowing before you start:
+
+- **Replacing a dictionary replaces all of it.** If the original held three clips and yours holds
+  one, the other two are gone, and anything that played them stops working. Copy the original,
+  swap the clip you want changed, and keep the rest.
+- **Names are matched by number, not by spelling.** Tools sometimes show a clip under a label from
+  whoever built it while the actual name underneath is the right one. If a pack looks wrongly named
+  but works, that is why.
+
+To find which dictionary and clip a server emote uses, ask the server. Many publish the list. The
+log also names every dictionary the server streams, so you can check a name is spelled right.
+
 ## Changing files while the game runs
 
 You do not have to restart FiveM after every change. The plugin watches the `tex_overrides`
@@ -289,6 +316,7 @@ crashed, the log from the crashed session is still there.
 | `registerRawStreamingFile @ ...` | Internal: found the function it works through |
 | `MH_EnableHook: MH_OK` | Internal: ready |
 | `OVERRIDE-REG slot <- file` | Your file took over that item |
+| `OVERRIDE-REG ... pinning both` | The game had that name under a second id; the plugin holds both |
 | `OVERRIDE-TAKEOVER slot <- file` | The slot already existed, so its handle was replaced with the local raw handle |
 | `OVERRIDE-WAIT slot <- file` | The local file is ready and will bind when its target slot appears |
 | `OVERRIDE-FAILED slot <- file` | Registration failed and produced no usable local raw entry |
