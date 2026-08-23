@@ -1504,7 +1504,7 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             // Read the pool back. A claim can report success and leave the entry pointing at the
             // game's own file, which every other line in this log would call healthy.
             if (g_mgr && g_mgr->entries) {
-                int pointing = 0, elsewhere = 0, nohandle = 0, shownBad = 0;
+                int pointing = 0, elsewhere = 0, nohandle = 0;
                 for (auto& ov : g_ovs) {
                     if (!ov.handle) { ++nohandle; continue; }
                     bool any = false, all = true;
@@ -1517,9 +1517,8 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                     if (all) ++pointing;
                     else {
                         ++elsewhere;
-                        if (g_minLogLevel == LogLevel::Debug || ++shownBad <= 10)
-                            LOG_WARN(LogCategory::Verify, "  NOT OURS YET: %s (id=%u alt=%u ours=%08x, pool holds %08x)", ov.slot, ov.id, ov.altId,
-                                     ov.handle, g_mgr->entries[ov.id < (uint32_t)g_mgr->numEntries ? ov.id : 0].handle);
+                        LOG_WARN(LogCategory::Verify, "  NOT OURS YET: %s (id=%u alt=%u ours=%08x, pool holds %08x)", ov.slot, ov.id, ov.altId,
+                                 ov.handle, g_mgr->entries[ov.id < (uint32_t)g_mgr->numEntries ? ov.id : 0].handle);
                     }
                 }
                 LOG_INFO(LogCategory::Verify, "Status: %d slot(s) pointing to user files, %d still point to game files (re-asserted each second), %d unassigned",
@@ -1528,13 +1527,13 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                 // Owning the slot is only half of it. If the game already has the asset in memory
                 // it will not read the handle again, so the swap is invisible no matter how
                 // correct every line above is. Count how many of ours are already resident.
-                { int resident = 0, pending = 0, cold = 0, pinned = 0, shownHot = 0;
+                { int resident = 0, pending = 0, cold = 0, pinned = 0;
                   for (auto& ov : g_ovs) {
                       if (ov.id >= (uint32_t)g_mgr->numEntries) continue;
                       uint32_t f = g_mgr->entries[ov.id].flags;
                       if ((f & 3) == 1) ++resident; else if ((f & 3) == 0) ++cold; else ++pending;
                       if ((f >> 16) & 1) ++pinned;
-                      if ((f & 3) == 1 && (g_minLogLevel == LogLevel::Debug || ++shownHot <= 10))
+                      if ((f & 3) == 1)
                           LOG_WARN(LogCategory::Verify, "  ALREADY IN MEMORY: %s (status=%s, strflags=%04x, deps=%u) — game will reload when re-equipped",
                                    ov.slot, strStatusText(f), (unsigned)(f >> 16), (unsigned)((f >> 2) & 0x3FFF));
                   }
@@ -1796,10 +1795,8 @@ static void costReport()
         LOG_INFO(LogCategory::Audit, "Pack cost when fully loaded: %.1f MB texture memory + %.1f MB virtual memory",
                  g_costPhys / 1048576.0, g_costVirt / 1048576.0);
         std::sort(g_costBig.rbegin(), g_costBig.rend());
-        size_t shownHeavy = (g_minLogLevel == LogLevel::Debug) ? g_costBig.size() : std::min<size_t>(g_costBig.size(), (size_t)10);
-        for (size_t i = 0; i < shownHeavy; ++i)
-            LOG_WARN(LogCategory::Audit, "  HEAVY %6.1f MB  %s (likely 4K or uncompressed; shrink to fight texture loss)", g_costBig[i].first / 1048576.0, g_costBig[i].second.c_str());
-        if (g_costBig.size() > shownHeavy) LOG_WARN(LogCategory::Audit, "  ...and %zu more file(s) over 8 MB", g_costBig.size() - shownHeavy);
+        for (const auto& item : g_costBig)
+            LOG_WARN(LogCategory::Audit, "  HEAVY %6.1f MB  %s (likely 4K or uncompressed; shrink to fight texture loss)", item.first / 1048576.0, item.second.c_str());
         // Past ~1 GB the pack no longer fits the budget, and eviction inside GTA5.exe is
         // passive-only (cfx #3874), so the pool saturates and the whole world drops to low LOD.
         // That is the "textures not loading" report from players who never crash. The ceiling is
