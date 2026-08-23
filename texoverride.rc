@@ -1,8 +1,26 @@
 // FiveM (asi-five) refuses any .asi on game build 2189+ that does not claim support for the running
 // build. It does FindResource(module, L"FX_ASI_BUILD", MAKEINTRESOURCE(GetGameBuild())), so the
 // resource NAME is FX_ASI_BUILD and its TYPE is the build number. One line per supported build.
-// Your FiveM logs show b3751; 3788 is added as a near-future cushion. Add more lines as builds move.
+// Servers pin their own build, so one line is not enough: a server on b3407 refused the plugin
+// outright and produced no log at all, which reads as "it does nothing" (issue #10). A line for a
+// build that does not exist costs nothing, a missing one fails in silence, so claim them broadly.
+// If a pattern does not match on an older build the plugin says so and disables itself, which is
+// a failure someone can actually read. Add a line when the build ladder moves.
+FX_ASI_BUILD 2189 BEGIN "\0" END
+FX_ASI_BUILD 2372 BEGIN "\0" END
+FX_ASI_BUILD 2545 BEGIN "\0" END
+FX_ASI_BUILD 2612 BEGIN "\0" END
+FX_ASI_BUILD 2699 BEGIN "\0" END
+FX_ASI_BUILD 2802 BEGIN "\0" END
+FX_ASI_BUILD 2944 BEGIN "\0" END
+FX_ASI_BUILD 3095 BEGIN "\0" END
+FX_ASI_BUILD 3258 BEGIN "\0" END
+FX_ASI_BUILD 3407 BEGIN "\0" END
+FX_ASI_BUILD 3442 BEGIN "\0" END
+FX_ASI_BUILD 3570 BEGIN "\0" END
+FX_ASI_BUILD 3679 BEGIN "\0" END
 FX_ASI_BUILD 3751 BEGIN "\0" END
+FX_ASI_BUILD 3775 BEGIN "\0" END
 FX_ASI_BUILD 3788 BEGIN "\0" END
 
 // Version resource. An unsigned binary with NO version info at all is itself a weighting factor

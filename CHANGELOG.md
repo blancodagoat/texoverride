@@ -2,6 +2,10 @@
 
 ## 0.8.8 (2026-08-23)
 
+- Works on servers that run an older game build. The plugin has to name every build it supports,
+  and it only named the two newest, so on a server pinned to anything else FiveM refused to load it
+  and nothing was written to the log at all. That looked like a plugin that does nothing. It now
+  names every build from 2189 up. Reported by benzwxc on a build 3407 server (issue #10).
 - Weapon models can be replaced now. Put a `.ydr` file named after the weapon (like
   `w_pi_pistol.ydr`) straight into `tex_overrides` and the plugin claims that slot the same way it
   claims a texture or animation. The file name has to start with `w_`, which is how every GTA V
