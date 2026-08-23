@@ -433,7 +433,7 @@ static void readCosts(std::vector<Cand>& v)
     for (unsigned i = 0; i < made; ++i) { WaitForSingleObject(th[i], INFINITE); CloseHandle(th[i]); }
 }
 
-static std::vector<Cand> g_cands;   // filled by walkDir in Setup, consumed by scanFinish
+static std::vector<Cand> g_cands;   // filled and consumed by the background startup pass
 static void costReport();   // defined with the budget code, which it compares the pack against
 
 // Runs on the beat thread, NOT in DllMain. Everything here opens files, and Setup() sits in
@@ -1393,6 +1393,67 @@ static void costReport()
     }
 }
 
+// The budget table, the streaming manager and the live-reload functions are all optional, and
+// none of them has to exist before the game's entry point runs. Only the hook does. So they are
+// found out here on the beat thread. The hook waits on g_scanDone, which is not set until this
+// and the file scan are both done, so it never sees half of this filled in.
+static void locateRuntimePatterns()
+{
+    const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
+    uint8_t* vram = scanModule(PAT_VRAM, 13);
+    uint64_t* table = vram ? (uint64_t*)ripTarget(vram + 6) : nullptr;
+    if (table && vramTableSane(table, &g_budgetCurr)) g_vramTable = table;
+    else logf("budget: vram table %s — texture budget left alone, everything else still works",
+              vram ? "failed the sanity check" : "pattern NOT FOUND");
+
+    const short PAT_MGR[] = { 0x74,0x1A,0x8B,0x15,-1,-1,-1,-1,0x48,0x8D,0x0D,-1,-1,-1,-1,0x41 };
+    if (uint8_t* q = scanModule(PAT_MGR, 16)) {
+        g_mgr = (StrMgr*)ripTarget(q + 11);
+        logf("streaming manager @ %p", (void*)g_mgr);
+    }
+    else logf("manager pattern NOT FOUND — claims still register, but nothing can re-assert them");
+
+    const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
+    if (uint8_t* q = scanModule(PAT_GRS, 19)) {
+        if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4);
+    }
+    const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
+    if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
+    logf("live reload: rawStreamer=%s getEntry=%s",
+         g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING");
+}
+
+// _budget.txt and the placement .xml files are user files too, so they are read out here with
+// the rest of them instead of under the loader lock. Two functions because they sit on opposite
+// sides of the scan: the budget decision needs the file before the scan starts (see
+// backgroundStartup), and the placement parse is not needed until the first beat.
+static void readBudgetFile()
+{
+    char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
+    FILE* bf = nullptr;
+    if (!fopen_s(&bf, bp, "rb") && bf) {
+        char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
+        double gb = atof(buf);
+        if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
+        else {
+            g_budgetWant = 0.0;
+            logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it");
+        }
+    }
+}
+static void loadPlacementFiles()
+{
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do { parsePlacementXml(std::string(g_overrideDir) + fd.cFileName, fd.cFileName, g_pl); }
+        while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    for (auto& pc : g_pl)
+        logf("placement: collection %s — %zu preset(s) from %s", pc.name.c_str(), pc.presets.size(), pc.src.c_str());
+}
+
 static void Setup()
 {
     char self[MAX_PATH]; GetModuleFileNameA(g_self, self, MAX_PATH);
@@ -1416,62 +1477,9 @@ static void Setup()
     { time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
       char d[32]; strftime(d, sizeof d, "%Y-%m-%d", &tm);
       logf("================ texoverride " TEXOVERRIDE_VERSION " loaded (%s) ================", d); }
-    crashSaverStartup();   // quarantine anything a crash left in the journal, before the scan
-    g_crashSaverRan = true;
-    // Only the directory walk happens here. It opens no files, so it stays cheap even on a huge
-    // pack, and the expensive part (one header read per file) is left to scanFinish on the beat
-    // thread. Setup() runs in front of the game's entry point: anything slow here is boot time.
+    // The hook waits on this. Every user-file read and every optional pattern scan now happens
+    // on the beat thread (backgroundStartup), which sets it when it is done.
     g_scanDone = CreateEventA(nullptr, TRUE, FALSE, nullptr);
-    walkDir(std::string(g_overrideDir), "", g_cands);
-    logf("found %zu file(s); reading their headers in the background while the game starts", g_cands.size());
-    // ---- texture budget: find the table now, decide the number later -------------------------
-    // The DECISION cannot happen here. Setup() runs inside DllMain under the loader lock, and
-    // creating a DXGI factory there comes back empty (0.7.0 shipped with the probe here and every
-    // log said "cannot read this card's memory"). The old opt-in path had the same call and hid
-    // the same failure, because a zero there only skipped a clamp. Locating the table is just a
-    // module scan, so that stays; probeVram() and the sizing run on the beat thread, which cannot
-    // start until DllMain returns and the lock is gone. See decideBudget().
-    { const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
-      uint8_t* q = scanModule(PAT_VRAM, 13);
-      uint64_t* t = q ? (uint64_t*)ripTarget(q + 6) : nullptr;
-      if (t && vramTableSane(t, &g_budgetCurr)) g_vramTable = t;
-      else logf("budget: vram table %s — texture budget left alone, everything else still works",
-                q ? "failed the sanity check" : "pattern NOT FOUND");
-
-      char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
-      FILE* bf = nullptr;
-      if (!fopen_s(&bf, bp, "rb") && bf) {
-          char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
-          double gb = atof(buf);
-          if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
-          else { g_budgetWant = 0.0; logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it"); }
-      } }
-
-    // tattoo placement files: *.xml at the root of tex_overrides (edited overlays.xml copies)
-    { WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
-      if (h != INVALID_HANDLE_VALUE) {
-          do { parsePlacementXml(std::string(g_overrideDir) + fd.cFileName, fd.cFileName, g_pl); } while (FindNextFileA(h, &fd));
-          FindClose(h);
-      } }
-    for (auto& pc : g_pl) logf("placement: collection %s — %zu preset(s) from %s", pc.name.c_str(), pc.presets.size(), pc.src.c_str());
-
-    // rage::strStreamingEngine::ms_info, via the lea in Cfx's g_storeMgr pattern (Streaming.cpp)
-    const short PAT_MGR[] = { 0x74,0x1A,0x8B,0x15,-1,-1,-1,-1,0x48,0x8D,0x0D,-1,-1,-1,-1,0x41 };
-    if (uint8_t* q = scanModule(PAT_MGR, 16)) {
-        g_mgr = (StrMgr*)ripTarget(q + 11);
-        logf("streaming manager @ %p", (void*)g_mgr);
-    }
-    else logf("manager pattern NOT FOUND — claims still register, but nothing can re-assert them");
-
-    // live-reload plumbing, both from Cfx's published patterns (LoadStreamingFile.cpp):
-    //   getRawStreamer          — the game's pgRawStreamer instance
-    //   pgRawStreamer::GetEntry — re-stats an entry when its timestamp is 0
-    { const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
-      if (uint8_t* q = scanModule(PAT_GRS, 19)) { if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4); }
-      const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
-      if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
-      logf("live reload: rawStreamer=%s getEntry=%s",
-           g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING"); }
 
     const short PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
     uint8_t* p = scanModule(PAT, sizeof PAT / sizeof *PAT);
@@ -1575,21 +1583,52 @@ static DWORD WINAPI UpdateCheck(LPVOID)
     return 0;
 }
 
-// SEH so a fault in the scan cannot leave the hook waiting on an event nobody will ever set.
-// (Own function: SEH inside BeatLoop's infinite loop confuses MSVC's return analysis.)
+// Order matters. The budget is decided before the scan, not after: on a big pack the scan runs
+// for a long while, and for all of it the game would be stuck at its own texture ceiling. It
+// cannot go any earlier than this, because decideBudget needs the table locateRuntimePatterns
+// finds and the number _budget.txt holds.
+static void backgroundStartup()
+{
+    crashSaverStartup();
+    g_crashSaverRan = true;
+    locateRuntimePatterns();
+    readBudgetFile();
+    decideBudget();   // DXGI only works out here, after DllMain has returned
+    walkDir(std::string(g_overrideDir), "", g_cands);
+    logf("found %zu file(s); reading their headers in the background while the game starts", g_cands.size());
+    scanFinish();
+    loadPlacementFiles();
+}
+
+static bool backgroundStartupCppSafe()
+{
+    try { backgroundStartup(); return true; }
+    catch (const std::exception& e) { logf("background startup failed: %s", e.what()); }
+    catch (...) { logf("background startup failed with an unknown C++ exception"); }
+    return false;
+}
+
+// SEH so a fault in background startup cannot leave the hook waiting on an event nobody will
+// ever set. (No C++ objects in this frame, which is what makes __try legal; they live in the
+// helper. Own function: SEH inside BeatLoop's infinite loop confuses MSVC's return analysis.)
+// This now covers crashSaverStartup as well, and that is intended: a fault in there can leave
+// the journal half processed, but g_scanDone is still set and the game still boots, which beats
+// a hook waiting five minutes on a plugin that is already broken. The journal file is left where
+// it is, so the next launch gets another go at it.
 static void scanFinishSafe()
 {
-    __try { scanFinish(); }
+    bool ok = false;
+    __try { ok = backgroundStartupCppSafe(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        logf("FAULT during the file scan (code %08X) — carrying on with whatever it had", GetExceptionCode());
+        logf("FAULT during background startup (code %08X) — carrying on with whatever was ready", GetExceptionCode());
     }
+    if (!ok) logf("background startup did not finish; only what it had already found is loaded this session");
     if (g_scanDone) SetEvent(g_scanDone);
 }
 
 static DWORD WINAPI BeatLoop(LPVOID)
 {
-    decideBudget();   // first thing off the loader lock: DXGI only works out here
-    scanFinishSafe();   // the file reads, off the loader lock at last
+    scanFinishSafe();   // all user-file reads, optional scans and the budget decision, off the loader lock
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
             Sleep(1000);
