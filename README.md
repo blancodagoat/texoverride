@@ -281,9 +281,16 @@ and it is what stops vehicle parts, props and other `.ydr` files from being load
 Texture-only mods (`.ytd` only, no model change) have always worked. Nothing new is needed for
 those.
 
-The same server-streams-it rule applies here as it does for animations: a vanilla GTA weapon
-goes through the same streaming call the plugin listens on, so those *can* be replaced. If the
-log shows the slot marked `[overridable]`, it works.
+Which weapons this reaches has not been tested as thoroughly as the rest of the plugin yet, so
+here is the honest state of it. A weapon your **server** streams is listed in the log as a
+`Server file` line and can be replaced, the same as an animation. A weapon that came with GTA is
+not listed there, because that list only shows what the server sends. Those may or may not work,
+and nobody has posted a log either way.
+
+So try it, then read `plugins/texoverride.log`. A line saying `OVERRIDE-REG` or `REDIRECT` with
+your file name on it means the plugin claimed the slot. If your weapon is unchanged in game and
+neither line is there, it did not take, and that is worth opening an issue about with the log
+attached.
 
 ## Changing files while the game runs
 

@@ -30,12 +30,17 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
    collection). No name whitelist: a scan of every overlay rpf found ~100 unrelated naming
    families plus arbitrary server packs, so the gate is type + exactness (`isAllowedKey`).
 
-3. **Weapon drawables** — `tex_overrides/<name>.ydr` at the ROOT, no folder. The file name must
+3. **Weapon drawables** (0.8.8, PR #11 by chocomintw) — `tex_overrides/<name>.ydr` at the ROOT, no folder. The file name must
    start with `w_`. Every GTA V weapon — base game and DLC — uses this prefix (w_pi_, w_ar_,
    w_sg_, w_sr_, w_sm_, w_mg_, w_ex_, w_me_, w_lc_, etc.), and server-added weapons follow the
    same convention. The prefix is what separates weapon drawables from vehicle parts, prop
    drawables, building pieces and any other `.ydr` in the game. Texture dicts (`.ytd`) for weapons
    go through mechanism 2 and already worked before 0.8.8.
+   **UNVERIFIED: whether a VANILLA weapon slot can be claimed.** The PR's README text asserted it
+   could, citing the animations rule, which actually says the opposite (a file that shipped with
+   GTA never passes through `registerRawStreamingFile`, which is why the plugin CALLS it itself for
+   base clothing). Server-streamed weapons are fine by the same argument as `.ycd`. The README now
+   states both and asks for a log; replace that wording the moment one shows up either way.
 
 4. **Tattoo placement** — `tex_overrides/<name>.xml` at the root (an edited copy of a pack's
    `overlays.xml`). Moves/resizes/rotates tattoos by patching the parsed values inside the game's
