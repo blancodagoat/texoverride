@@ -392,7 +392,9 @@ GTA itself, and it cannot make a pack fit that is simply too big. Shrinking the 
 ## Turning it off
 
 Create an empty file named `_OFF` (no file extension) inside `tex_overrides` and restart FiveM.
-The plugin stays installed but does nothing, including the update check.
+The plugin stays installed but returns before it creates logs, events, hooks or worker threads. It
+does not rotate `texoverride.log` or run the update check. That makes `_OFF` a clean A/B control:
+the ASI still passes FiveM's loader check, but none of texoverride's runtime machinery starts.
 
 ## Reading the log
 
