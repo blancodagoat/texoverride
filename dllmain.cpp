@@ -302,6 +302,7 @@ static const char* rel(const char* file)
     return strlen(file) > n ? file + n : file;
 }
 
+static bool isBlockedCollection(const std::string& coll);   // defined below, used by the classifier
 static const char* classifyCollection(const std::string& coll)
 {
     std::string c = lower(coll);
@@ -310,6 +311,8 @@ static const char* classifyCollection(const std::string& coll)
     if (c == "mp_f_freemode_01") return "Freemode Female";
     if (c.rfind("mp_f_freemode_01", 0) == 0) return "Freemode Female DLC";
     if (c.rfind("a_c_", 0) == 0) return "Animal Ped";
+    // must come after the freemode tests: mp_m_freemode_01 also starts with the blocked mp_m_
+    if (isBlockedCollection(c)) return "Story/Ambient Ped";
     return "Custom Server Ped";
 }
 
@@ -799,7 +802,7 @@ static void placementBeat()
             for (int k = 0; k < 5; ++k) {
                 if (fabsf(q[k] - pc.presets[i].v[k]) <= 1e-4f) continue;
                 q[k] = pc.presets[i].v[k];
-                if (++pc.writes <= 40) LOG_DEBUG(LogCategory::Tattoo, "PLACEMENT: %s[%zu] field %d -> %f", pc.name.c_str(), i, k, pc.presets[i].v[k]);
+                if (++pc.writes <= 40) LOG_INFO(LogCategory::Tattoo, "PLACEMENT: %s[%zu] field %d -> %f", pc.name.c_str(), i, k, pc.presets[i].v[k]);
             }
         }
     }
@@ -1544,14 +1547,43 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             InterlockedExchange(&g_idsReady, 1);
         }
 
-        // COLLECTION: record each distinct collection the server streams that is overridable
+        // MAP: one line per distinct thing the server streams. This is the discovery channel:
+        // names we REFUSE have to appear too, or a refused collection reads exactly like one the
+        // server never streamed, and a user's log is the only way we ever learn about a naming
+        // family the gate does not know yet. That is how the folder whitelist died in 0.8.5.
+        //
+        // Two axes, and they are not the same question: classifyCollection says WHAT the thing is,
+        // the reach tag says whether we would ever touch it. Reach is worked out from the
+        // COLLECTION, never from isAllowedKey on whichever file streamed first, which mislabelled
+        // any collection whose first file happened to be oddly named. It has three states, because
+        // for a collection that is neither freemode/a_c_ nor blocked the answer really does depend
+        // on the file names inside it.
+        //
+        // Root files are not collections, so they get their own line instead of going through
+        // collectionOf, which returns the whole filename for them.
         std::string keyLower = lower(asName);
-        if (keyLower.find('/') != std::string::npos && isAllowedKey(keyLower)) {
-            std::string coll = collectionOf(keyLower);
-            if (g_collSeen.insert(coll).second) {
-                LOG_INFO(LogCategory::Collection, "Discovered server collection: %s [%s] -> use folder: tex_overrides/%s/",
+        bool rootFile = keyLower.find('/') == std::string::npos;
+        std::string coll = rootFile ? keyLower : collectionOf(keyLower);
+
+        if (g_collSeen.insert(coll).second) {
+            if (rootFile) {
+                LOG_INFO(LogCategory::Collection, "Server file:       %-40s [%s]", coll.c_str(),
+                         isAllowedKey(keyLower) ? "overridable, put yours in tex_overrides/"
+                                                : "OTHER - never touched");
+            } else if (isPedCollection(coll)) {
+                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [overridable] -> tex_overrides/%s/",
+                         coll.c_str(), classifyCollection(coll), coll.c_str());
+            } else if (isBlockedCollection(coll)) {
+                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [OTHER - never touched]",
+                         coll.c_str(), classifyCollection(coll));
+            } else {
+                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [depends on the file names inside] -> tex_overrides/%s/",
                          coll.c_str(), classifyCollection(coll), coll.c_str());
             }
+            // the old cap stopped logging at 500 and said nothing, so the tail read like a server
+            // that streams nothing at all. Say it out loud instead.
+            if (g_collSeen.size() == 500)
+                LOG_WARN(LogCategory::Collection, "500 distinct names logged, the rest will not be listed");
         }
 
         LeaveCriticalSection(&g_cs);
@@ -1572,8 +1604,9 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             LeaveCriticalSection(&g_cs);
             if (redirect)
             {
-                InterlockedIncrement(&g_redirects);
-                LOG_DEBUG(LogCategory::Claim, "REDIRECT %s -> tex_overrides/%s", asName, rel(redirect));
+                long n = InterlockedIncrement(&g_redirects);
+                if (n <= 100)       LOG_INFO(LogCategory::Claim, "REDIRECT %s -> tex_overrides/%s", asName, rel(redirect));
+                else if (n == 101)  LOG_INFO(LogCategory::Claim, "REDIRECT: 100 logged, the rest are counted but not listed");
                 return o_regRaw(fileId, redirect, b1, asName, b2);
             }
         }
@@ -2114,7 +2147,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
                         if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
                         uint32_t old = e.handle;
                         e.handle = ov.handle;
-                        if (++g_reclaims <= 60) LOG_DEBUG(LogCategory::Claim, "RECLAIM: %s (id=%u, %08x -> %08x)", ov.slot, which, old, ov.handle);
+                        if (++g_reclaims <= 60) LOG_INFO(LogCategory::Claim, "RECLAIM: %s (id=%u, %08x -> %08x)", ov.slot, which, old, ov.handle);
                     }
                 }
                 LeaveCriticalSection(&g_cs);
