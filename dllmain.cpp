@@ -1058,6 +1058,7 @@ static void freeLiveOp(LiveOp& op)
 static std::deque<LiveOp> g_opQ;                                // guarded by g_cs
 static volatile LONG g_opsPending = 0;                          // batch queued, not yet drained
 static ULONGLONG g_journalClearAt = 0;                          // watcher thread only
+static volatile LONGLONG g_lastPumpWorkAt = 0;                  // caps work when PeekMessageW spins
 
 // Overwritten file: zero the raw entry's timestamp, then GetEntry re-stats it (new size picked
 // up). Without this an overwritten file keeps its old cached size — short or wild reads.
@@ -1160,7 +1161,14 @@ static BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
     // only that thread ever drains, so ops always run where Cfx runs its own registrations
     DWORD tid = GetCurrentThreadId();
     if (!g_pumpTid) g_pumpTid = tid;
-    if (g_opsPending && tid == g_pumpTid) drainOps();
+    if (g_opsPending && tid == g_pumpTid) {
+        // Some message loops call PeekMessageW repeatedly in one rendered frame. One shared
+        // work window every 10 ms keeps "eight per call" from becoming hundreds per frame.
+        LONGLONG now = (LONGLONG)GetTickCount64();
+        LONGLONG last = InterlockedCompareExchange64(&g_lastPumpWorkAt, 0, 0);
+        if (now - last >= 10 && InterlockedCompareExchange64(&g_lastPumpWorkAt, now, last) == last)
+            drainOps();
+    }
     return g_origPeek(m, w, a, b, r);
 }
 
