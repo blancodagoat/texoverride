@@ -53,6 +53,15 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
 - Root files: `.ytd` any name; `.ycd` any name; `.ydr` name must start with `w_`; `.ymt` any name
   except the 8 vanilla animal names. Placement `.xml`: fingerprint match required (below).
 - The safety gate exists because filename-alone matching would cross-wire unrelated items. Keep it.
+- **Log levels are a user contract, not a tidiness knob** (0.8.8, chocomintw's framework in #12,
+  combined with our collection-map fix). `logMessage(level, category, ...)` behind LOG_INFO/WARN/
+  ERROR/DEBUG, one lock (`g_logCs`) because the hook runs on more than one thread, and DEBUG off
+  unless `_debug.txt` exists in tex_overrides. The rule: **anything the README's log table
+  documents has to be INFO**, because the log is a support tool for players, not a dev trace. #12
+  had REDIRECT, PLACEMENT and RECLAIM at DEBUG; those are the three "did my file actually get
+  used" confirmations, one per override mechanism, and behind a debug switch nobody knows about
+  the default log stops answering the only question people ask. Promoted back. Caps announce
+  themselves (REDIRECT at 100) instead of truncating in silence.
 - **The `collection:` map must keep logging names it REFUSES** (`OTHER - never touched`). PR #11
   cut those lines as noise, which is backwards: a refused name that is not logged looks identical
   to one the server never streamed, and a user's log is the only channel through which a naming

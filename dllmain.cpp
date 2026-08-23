@@ -138,7 +138,87 @@ static void probeVram();   // defined with the budget raiser below; fills g_vram
 static uint64_t g_costVirt, g_costPhys;
 static std::vector<std::pair<uint64_t, std::string>> g_costBig;   // files >= 8 MB in memory
 
-static void logf(const char* fmt, ...);
+enum class LogLevel {
+    Debug = 0,
+    Info  = 1,
+    Warn  = 2,
+    Error = 3
+};
+
+enum class LogCategory {
+    Core,
+    Scan,
+    Collection,
+    Audit,
+    Claim,
+    Verify,
+    Live,
+    Tattoo,
+    Update
+};
+
+static LogLevel g_minLogLevel = LogLevel::Info;
+static CRITICAL_SECTION g_logCs;
+static bool g_logCsInit = false;
+
+static inline const char* levelToString(LogLevel lvl)
+{
+    switch (lvl) {
+    case LogLevel::Debug: return "DEBUG";
+    case LogLevel::Info:  return "INFO";
+    case LogLevel::Warn:  return "WARN";
+    case LogLevel::Error: return "ERROR";
+    default:              return "INFO";
+    }
+}
+
+static inline const char* categoryToString(LogCategory cat)
+{
+    switch (cat) {
+    case LogCategory::Core:       return "[CORE]";
+    case LogCategory::Scan:       return "[SCAN]";
+    case LogCategory::Collection: return "[COLLECTION]";
+    case LogCategory::Audit:      return "[AUDIT]";
+    case LogCategory::Claim:      return "[CLAIM]";
+    case LogCategory::Verify:     return "[VERIFY]";
+    case LogCategory::Live:       return "[LIVE]";
+    case LogCategory::Tattoo:     return "[TATTOO]";
+    case LogCategory::Update:     return "[UPDATE]";
+    default:                      return "[CORE]";
+    }
+}
+
+static void logMessage(LogLevel level, LogCategory cat, const char* fmt, ...)
+{
+    if (level < g_minLogLevel) return;
+    if (!g_logPath[0]) return;
+
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(buf, sizeof(buf), _TRUNCATE, fmt, ap);
+    va_end(ap);
+
+    time_t t = time(nullptr);
+    struct tm tm;
+    localtime_s(&tm, &t);
+    char ts[16];
+    strftime(ts, sizeof ts, "%H:%M:%S", &tm);
+
+    if (g_logCsInit) EnterCriticalSection(&g_logCs);
+    FILE* f = nullptr;
+    if (fopen_s(&f, g_logPath, "a") == 0 && f) {
+        fprintf(f, "[%s] [%s] %s %s\n", ts, levelToString(level), categoryToString(cat), buf);
+        if (level >= LogLevel::Warn) fflush(f);
+        fclose(f);
+    }
+    if (g_logCsInit) LeaveCriticalSection(&g_logCs);
+}
+
+#define LOG_DEBUG(cat, fmt, ...) logMessage(LogLevel::Debug, cat, fmt, ##__VA_ARGS__)
+#define LOG_INFO(cat, fmt, ...)  logMessage(LogLevel::Info,  cat, fmt, ##__VA_ARGS__)
+#define LOG_WARN(cat, fmt, ...)  logMessage(LogLevel::Warn,  cat, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(cat, fmt, ...) logMessage(LogLevel::Error, cat, fmt, ##__VA_ARGS__)
 
 // The size check every load path shares (startup scan, live new file, live overwrite).
 // Over 32 MB in EITHER resource segment it says so and loads the file anyway. Until 0.8.1 it
@@ -166,13 +246,13 @@ static Cost readCost(const char* path)
 static bool cannotLoad(const char* key, const Cost& c, bool quiet)
 {
     if (!c.readable) {
-        if (!quiet) logf("UNREADABLE %s - cannot open it, so it is not loaded this launch", key);
+        if (!quiet) LOG_WARN(LogCategory::Scan, "UNREADABLE %s - cannot open it; not loaded this launch", key);
         return true;
     }
     uint64_t worst = (c.cv > c.cp) ? c.cv : c.cp;
     if (worst > (32ull << 20) && !quiet)
-        logf("HUGE  %s - %.1f MB of %s data, and it IS loaded. Files this big have crashed the game before, so if you start crashing this is the first one to shrink (CodeWalker, Tools, Shrink Textures).",
-             key, worst / 1048576.0, (c.cv > c.cp) ? "mesh" : "texture");
+        LOG_WARN(LogCategory::Scan, "HUGE  %s - %.1f MB of %s data (loaded; if crashing, shrink with CodeWalker)",
+                 key, worst / 1048576.0, (c.cv > c.cp) ? "mesh" : "texture");
     return false;
 }
 static bool cannotLoadPath(const char* path, const char* key, bool quiet)
@@ -209,17 +289,6 @@ static bool g_didRegister = false;
 static bool g_b1 = true, g_b2 = false, g_captured = false;
 static CRITICAL_SECTION g_cs;   // guards the one-time registration + the collection map (hook may run on >1 thread)
 
-static void logf(const char* fmt, ...)
-{
-    FILE* f = nullptr;
-    if (fopen_s(&f, g_logPath, "a") != 0 || !f) return;
-    time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
-    char ts[16]; strftime(ts, sizeof ts, "%H:%M:%S", &tm);
-    fprintf(f, "[%s] ", ts);
-    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
-    fputc('\n', f); fclose(f);
-}
-
 #define TEXOVERRIDE_VERSION "0.8.8"
 
 static std::string lower(std::string s) { for (char& c : s) c = (char)tolower((unsigned char)c); return s; }
@@ -231,6 +300,20 @@ static const char* rel(const char* file)
 {
     size_t n = strlen(g_overrideDir);
     return strlen(file) > n ? file + n : file;
+}
+
+static bool isBlockedCollection(const std::string& coll);   // defined below, used by the classifier
+static const char* classifyCollection(const std::string& coll)
+{
+    std::string c = lower(coll);
+    if (c == "mp_m_freemode_01") return "Freemode Male";
+    if (c.rfind("mp_m_freemode_01", 0) == 0) return "Freemode Male DLC";
+    if (c == "mp_f_freemode_01") return "Freemode Female";
+    if (c.rfind("mp_f_freemode_01", 0) == 0) return "Freemode Female DLC";
+    if (c.rfind("a_c_", 0) == 0) return "Animal Ped";
+    // must come after the freemode tests: mp_m_freemode_01 also starts with the blocked mp_m_
+    if (isBlockedCollection(c)) return "Story/Ambient Ped";
+    return "Custom Server Ped";
 }
 
 // SAFETY: only human freemode-ped collections may be touched. Everything else — animal peds
@@ -387,11 +470,11 @@ static bool isAllowedKey(const std::string& key)
 static bool isIgnoredType(const std::string& ln, const std::string& rel, bool announce)
 {
     if (rel.find('/') == std::string::npos && isVanillaAnimalYmt(ln)) {
-        if (announce) logf("IGNORED %s - the game already owns that exact name and will not hand a .ymt over; the call that would replace it crashes the game outright. Every animal ships one, so this can never work. The rest of the mod still loads, and only parts it ADDED on top of the original animal stay unselectable.", rel.c_str());
+        if (announce) LOG_INFO(LogCategory::Scan, "IGNORED %s - vanilla animal .ymt collides with game metadata; other mod files still load", rel.c_str());
         return true;
     }
     if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
-        if (announce) logf("IGNORED %s - .meta files hold shop data (prices/menus), not looks; see README", rel.c_str());
+        if (announce) LOG_INFO(LogCategory::Scan, "IGNORED %s - .meta files hold shop/menu data, not looks; see README", rel.c_str());
         return true;
     }
     return false;
@@ -415,7 +498,7 @@ static void walkDir(const std::string& base, const std::string& rel, std::vector
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
         // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
         if (!isAllowedKey(slotStr)) {
-            logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ydr named w_*, .ymt, or .ydd/.yft named a_c_*", slotStr.c_str());
+            LOG_WARN(LogCategory::Scan, "SKIP %s - folder contents must use GTA ped part naming (e.g. head_000_r.ydd, uppr_diff_001_a_uni.ytd)", slotStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
@@ -484,14 +567,44 @@ static void scanFinish()
         }
     }
     LeaveCriticalSection(&g_cs);
-    logf("loaded %d override(s) in %.1fs; mode %s", n, (GetTickCount64() - t0) / 1000.0, g_off ? "OFF" : "ON");
+    LOG_INFO(LogCategory::Scan, "Loaded %d override(s) in %.1fs (mode %s)", n, (GetTickCount64() - t0) / 1000.0, g_off ? "OFF" : "ON");
     // say it out loud when the two path forms differ, so the next report of this arrives already
     // diagnosed instead of looking like "nothing works and the log looks fine"
     if (!g_ovs.empty() && g_ovs[0].gfile && g_ovs[0].gfile != g_ovs[0].file)
-        logf("your folder path has a non-English character in it, so the plugin hands the game the UTF-8 form of it. Before 0.8.3 that mismatch made every override silently fail to load.");
-    { std::unordered_map<std::string, int> per;   // per-collection tally, the first thing to check in a report
-      for (auto& ov : g_ovs) ++per[collectionOf(ov.slot)];
-      for (auto& kv : per) logf("  %-40s %d file(s)", kv.first.c_str(), kv.second); }
+        LOG_INFO(LogCategory::Scan, "Folder path contains non-English characters; using UTF-8 representation");
+
+    // Separate collection folders from loose root assets
+    std::unordered_map<std::string, int> collCounts;
+    std::unordered_map<std::string, int> rootExtCounts;
+    for (auto& ov : g_ovs) {
+        size_t s = std::string(ov.slot).find('/');
+        if (s != std::string::npos) {
+            ++collCounts[std::string(ov.slot).substr(0, s)];
+        } else {
+            const char* dot = strrchr(ov.slot, '.');
+            std::string ext = (dot && dot[1]) ? lower(dot + 1) : "(none)";
+            ++rootExtCounts[ext];
+        }
+    }
+
+    if (!collCounts.empty()) {
+        LOG_INFO(LogCategory::Scan, "  Collections (%zu):", collCounts.size());
+        for (auto& kv : collCounts) {
+            LOG_INFO(LogCategory::Scan, "    %-38s %3d file(s)  [%s]", kv.first.c_str(), kv.second, classifyCollection(kv.first));
+        }
+    }
+    if (!rootExtCounts.empty()) {
+        LOG_INFO(LogCategory::Scan, "  Root Assets:");
+        for (auto& kv : rootExtCounts) {
+            const char* typeDesc = "Other";
+            if (kv.first == "ytd") typeDesc = "Overlays (.ytd)";
+            else if (kv.first == "ydr") typeDesc = "Weapon models (.ydr)";
+            else if (kv.first == "ycd") typeDesc = "Clip animations (.ycd)";
+            else if (kv.first == "ymt" || kv.first == "yft" || kv.first == "ydd") typeDesc = "Animal models/meta";
+            LOG_INFO(LogCategory::Scan, "    %-38s %3d file(s)", typeDesc, kv.second);
+        }
+    }
+
     costReport();
     g_cands.clear(); g_cands.shrink_to_fit();
 }
@@ -579,10 +692,10 @@ static void parsePlacementXml(const std::string& path, const char* fname, std::v
     };
 
     size_t ps = x.find("<presets>"), pe = x.find("</presets>");
-    if (ps == std::string::npos || pe == std::string::npos) { logf("placement: %s has no <presets>, ignored", fname); return; }
+    if (ps == std::string::npos || pe == std::string::npos) { LOG_WARN(LogCategory::Tattoo, "Placement: %s has no <presets>, ignored", fname); return; }
 
     PlColl pc; pc.src = fname;
-    if (!text(pe, x.size(), "nameHash", pc.name)) { logf("placement: %s has no collection nameHash after </presets>, ignored", fname); return; }
+    if (!text(pe, x.size(), "nameHash", pc.name)) { LOG_WARN(LogCategory::Tattoo, "Placement: %s has no collection nameHash, ignored", fname); return; }
     pc.hash = joaat(pc.name.c_str(), pc.name.size());
 
     for (size_t pos = ps; (pos = x.find("<Item", pos)) != std::string::npos && pos < pe; ) {
@@ -595,7 +708,7 @@ static void parsePlacementXml(const std::string& path, const char* fname, std::v
         if (ok) { p.hash = joaat(nm.c_str(), nm.size()); pc.presets.push_back(p); }
         pos = end + 7;
     }
-    if (pc.presets.size() < 3) { logf("placement: %s has %zu preset(s), need 3+ to fingerprint, ignored", fname, pc.presets.size()); return; }
+    if (pc.presets.size() < 3) { LOG_WARN(LogCategory::Tattoo, "Placement: %s has %zu preset(s) (need 3+ to fingerprint), ignored", fname, pc.presets.size()); return; }
     out.push_back(std::move(pc));
 }
 
@@ -605,13 +718,13 @@ static void placementLocate()
     // points at loads ms_instance and the collections-array offset.
     const short PAT[] = { 0x41,0x0F,0xB7,0xDE,0x4C,0x8D,0x0D,-1,-1,-1,-1,0x41,0xB8 };
     uint8_t* p = scanModule(PAT, 13);
-    if (!p) { logf("placement: decoration pattern NOT FOUND — placement files inert"); return; }
+    if (!p) { LOG_WARN(LogCategory::Tattoo, "PedDecorationManager pattern NOT FOUND — placement files inert"); return; }
     uint8_t* comparator = ripTarget(p + 7);
     g_decorMgr = (uint8_t**)ripTarget(comparator + 3);
     int32_t off = *(int32_t*)(comparator + 7 + 3);
-    if (off <= 0 || off > 0x10000) { logf("placement: implausible collections offset 0x%x — placement disabled", off); g_decorMgr = nullptr; return; }
+    if (off <= 0 || off > 0x10000) { LOG_WARN(LogCategory::Tattoo, "Implausible collections offset 0x%x — placement disabled", off); g_decorMgr = nullptr; return; }
     g_decorCollOff = off;
-    logf("placement: PedDecorationManager @ %p, collections at +0x%x", (void*)g_decorMgr, off);
+    LOG_INFO(LogCategory::Tattoo, "PedDecorationManager @ %p, collections at +0x%x", (void*)g_decorMgr, off);
 }
 
 static bool placementSolveImpl(PlColl& pc, uint8_t* coll)
@@ -639,8 +752,8 @@ static bool placementSolveImpl(PlColl& pc, uint8_t* coll)
                     }
                     if (hits * 10 >= N * 7) {                           // >=70% stock values: layout confirmed
                         pc.arrOff = o; pc.nameOff = a; pc.stride = s; pc.uvOff = f; pc.solved = true;
-                        logf("placement: %s layout solved (array@+0x%02x stride=0x%x name+0x%x uv+0x%x, %zu/%zu stock)",
-                             pc.name.c_str(), o, s, a, hits, N);
+                        LOG_INFO(LogCategory::Tattoo, "%s layout solved (array@+0x%02x stride=0x%x uv+0x%x, %zu/%zu stock matched)",
+                                 pc.name.c_str(), o, s, f, hits, N);
                         return true;
                     }
                 }
@@ -659,7 +772,7 @@ static bool placementSolve(PlColl& pc, uint8_t* coll)
     __try { return placementSolveImpl(pc, coll); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         pc.dead = true;
-        logf("placement: %s hit unreadable memory while solving, skipped", pc.name.c_str());
+        LOG_WARN(LogCategory::Tattoo, "%s hit unreadable memory while solving, skipped", pc.name.c_str());
         return false;
     }
 }
@@ -689,7 +802,7 @@ static void placementBeat()
             for (int k = 0; k < 5; ++k) {
                 if (fabsf(q[k] - pc.presets[i].v[k]) <= 1e-4f) continue;
                 q[k] = pc.presets[i].v[k];
-                if (++pc.writes <= 40) logf("PLACEMENT  %s[%zu] field %d -> %f", pc.name.c_str(), i, k, pc.presets[i].v[k]);
+                if (++pc.writes <= 40) LOG_INFO(LogCategory::Tattoo, "PLACEMENT: %s[%zu] field %d -> %f", pc.name.c_str(), i, k, pc.presets[i].v[k]);
             }
         }
     }
@@ -703,7 +816,7 @@ static void placementBeatSafe()
     __try { placementBeat(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         InterlockedExchange(&g_plFault, 1);
-        logf("placement: memory fault — placement disabled for this session");
+        LOG_ERROR(LogCategory::Tattoo, "Memory fault — tattoo placement disabled for this session");
     }
 }
 // ========================================================================================
@@ -832,7 +945,7 @@ static void noteSlotWhy(const char* slot, int why)
     auto it = g_slotWhyByExt.find(ext);
     if (it != g_slotWhyByExt.end() && it->second == why) return;
     g_slotWhyByExt[ext] = why;
-    logf("slot lookup for .%s: %s", ext.c_str(), slotWhyText(why));
+    LOG_INFO(LogCategory::Claim, "Slot lookup for .%s: %s", ext.c_str(), slotWhyText(why));
 }
 
 static bool localRawHandle(const char* file, uint32_t* handle)
@@ -1008,31 +1121,31 @@ static void drainOps()   // runs on the game's main thread
                 g_ovs.push_back(op.ov); g_bySlot[op.ov.slot] = op.ov.file;
                 LeaveCriticalSection(&g_cs);
                 if (why == 0)
-                    logf("LIVE-ADD  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+                    LOG_INFO(LogCategory::Live, "LIVE-ADD: %s <- tex_overrides/%s (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
                 else if (why == 4)
-                    logf("LIVE-TAKEOVER  %s  <-  tex_overrides/%s  (id=%u raw handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
+                    LOG_INFO(LogCategory::Live, "LIVE-TAKEOVER: %s <- tex_overrides/%s (id=%u raw handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
                 else
-                    logf("LIVE-WAIT  %s has raw handle=%08x; its target slot will be attached when it appears", op.ov.slot, op.ov.handle);
+                    LOG_INFO(LogCategory::Live, "LIVE-WAIT: %s (raw handle=%08x; target slot attached when present)", op.ov.slot, op.ov.handle);
                 uint64_t cv = 0, cp = 0;
                 if (rscCost(op.ov.file, &cv, &cp) && cv + cp >= (8u << 20))
-                    logf("  HEAVY %.1f MB in memory — likely 4K or uncompressed; shrink it to fight texture loss", (cv + cp) / 1048576.0);
+                    LOG_WARN(LogCategory::Live, "  HEAVY %.1f MB in memory (likely 4K or uncompressed; shrink to fight texture loss)", (cv + cp) / 1048576.0);
             } else if (why == 1) {
                 // registerRawStreamingFile refuses a slot that already holds a handle.
                 // recoverOccupiedSlot has already tried the takeover path by here, so
                 // reaching this means we could not find a raw entry for our own file
                 // either. A restart claims the slot before the server or DLC mounts.
-                logf("live reload: %s is already loaded from the server or a DLC and no raw entry of our own was available to attach. Restart FiveM and the plugin claims it at startup, before those mount. Editing files it already owns still applies live.", op.ov.slot);
+                LOG_WARN(LogCategory::Live, "Live reload: %s is already loaded from server/DLC and no raw entry was available; restart FiveM to claim", op.ov.slot);
                 freeLiveOp(op);
             } else {
-                logf("live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
-                     why == 2 ? "no handle came back" : "fault inside the game's register call");
+                LOG_ERROR(LogCategory::Live, "Live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
+                          why == 2 ? "no handle came back" : "fault inside the game's register call");
                 freeLiveOp(op);
             }
         } else {
             if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
-                logf("LIVE-UPDATE  %s reread from disk; reapply the outfit or tattoo to see it", op.ov.slot);
+                LOG_INFO(LogCategory::Live, "LIVE-UPDATE: %s reread from disk (reapply outfit/tattoo to see it)", op.ov.slot);
             else
-                logf("live reload: %s changed, could not refresh it, restart to apply", op.ov.slot);
+                LOG_WARN(LogCategory::Live, "Live reload: %s changed, could not refresh it, restart to apply", op.ov.slot);
             free((void*)op.ov.slot);
         }
     }
@@ -1119,7 +1232,7 @@ static void crashSaverStartup()
             any = true;
         }
         fclose(f); if (q) fclose(q);
-        if (any) logf("CRASH SAVER: last run died while the game was taking these file(s); they are quarantined so this launch gets past it");
+        if (any) LOG_WARN(LogCategory::Scan, "CRASH SAVER: Last run died while registering file(s); quarantined to prevent crash loop");
     }
     DeleteFileA(g_inflightPath);
     if (fopen_s(&f, g_quarantinePath, "r") == 0 && f) {
@@ -1131,7 +1244,7 @@ static void crashSaverStartup()
         }
         fclose(f);
         for (auto& k : g_quarantine)
-            logf("QUARANTINED %s — not loaded; delete _quarantine.txt in tex_overrides to try it again", k.c_str());
+            LOG_WARN(LogCategory::Scan, "QUARANTINED %s — not loaded; delete _quarantine.txt in tex_overrides to try it again", k.c_str());
     }
 }
 
@@ -1155,12 +1268,12 @@ static void mergePlacement(std::vector<PlColl>& fresh)
                 npc.stride = old->stride; npc.uvOff = old->uvOff; npc.solved = true;
             }
         }
-        logf("placement: %s reloaded from %s (%zu presets%s)", npc.name.c_str(), npc.src.c_str(),
-             npc.presets.size(), npc.solved ? ", layout kept" : "");
+        LOG_INFO(LogCategory::Tattoo, "Placement: %s reloaded from %s (%zu presets%s)", npc.name.c_str(), npc.src.c_str(),
+                 npc.presets.size(), npc.solved ? ", layout kept" : "");
         if (old) *old = std::move(npc); else g_pl.push_back(std::move(npc));
     }
     LeaveCriticalSection(&g_cs);
-    if (g_plFault) logf("placement: NOTE — placement is disabled for this session (earlier fault), edits will apply after a restart");
+    if (g_plFault) LOG_WARN(LogCategory::Tattoo, "Placement: NOTE — placement is disabled for this session (earlier fault), edits will apply after a restart");
 }
 
 // Detects what changed and queues work; the game-touching half runs later in drainOps on the
@@ -1193,7 +1306,7 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         std::string key = lower(fwd(childRel));
         if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
         if (!isAllowedKey(key)) {
-            if (isNew && !quiet) logf("SKIP %s - inside a folder, a file has to be named the way GTA names ped parts (head_000_r.ydd, uppr_diff_001_a_uni.ytd, p_head_000.ydd and so on) or the plugin cannot tell it is a ped part at all. Loose files must be .ytd, .ycd, .ydr named w_*, .ymt, or .ydd/.yft named a_c_*", key.c_str());
+            if (isNew && !quiet) LOG_WARN(LogCategory::Scan, "SKIP %s - folder contents must use GTA ped part naming", key.c_str());
             continue;
         }
 
@@ -1203,20 +1316,20 @@ static void rescanTree(const std::string& base, const std::string& sub, bool qui
         LeaveCriticalSection(&g_cs);
 
         if (!known) {
-            if (!g_origPeek) { logf("live reload: new file %s needs a game restart", key.c_str()); continue; }
+            if (!g_origPeek) { LOG_INFO(LogCategory::Live, "Live reload: new file %s needs a game restart", key.c_str()); continue; }
             if (cannotLoadPath(fwd(full).c_str(), key.c_str(), quiet)) continue;   // quiet skips the baseline re-log
             { const char* nf = _strdup(fwd(full).c_str());
               batch.push_back({ 0, { _strdup(key.c_str()), nf, toUtf8(nf) }, 0 }); }
         }
         else if (handle && isChanged) {
             if ((handle >> 16) != 0)   // not in the game's own raw streamer; cannot re-stat it
-                logf("live reload: %s changed, restart to apply (handle %08x not raw)", key.c_str(), handle);
+                LOG_WARN(LogCategory::Live, "Live reload: %s changed, restart to apply (handle %08x not raw)", key.c_str(), handle);
             else if (!g_origPeek)
-                logf("live reload: %s changed, restart to apply", key.c_str());
+                LOG_INFO(LogCategory::Live, "Live reload: %s changed, restart to apply", key.c_str());
             else if (cannotLoadPath(fwd(full).c_str(), key.c_str(), false))
                 // the registered slot still points at this path with the OLD size cached, so the
                 // game may read a truncated slice of the new content; make that loud
-                logf("live reload: %s cannot be opened, so it was NOT re-read; free it up or restart", key.c_str());
+                LOG_WARN(LogCategory::Live, "Live reload: %s cannot be opened; not reread", key.c_str());
             else
                 batch.push_back({ 1, { _strdup(key.c_str()), nullptr }, handle });
         }
@@ -1231,7 +1344,7 @@ static void submitBatch(std::vector<LiveOp>& batch)
     // so a new batch just joins the back; the old 10 second sleep loop blocked the watcher thread
     // and threw the batch away for no reason other than the queue being busy.
     if (!journalWrite(batch)) {
-        logf("live reload: the crash-saver journal could not be written, so this change was not applied. Nothing is worth applying that a crash could not then be traced to.");
+        LOG_ERROR(LogCategory::Live, "Live reload: crash-saver journal could not be written; change not applied");
         for (auto& op : batch) freeLiveOp(op);
         return;
     }
@@ -1247,13 +1360,13 @@ static DWORD WINAPI WatchLoop(LPVOID)
     std::string dir = g_overrideDir; if (!dir.empty() && dir.back() == '\\') dir.pop_back();
     HANDLE h = FindFirstChangeNotificationA(dir.c_str(), TRUE,
         FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE);
-    if (h == INVALID_HANDLE_VALUE) { logf("live reload: cannot watch tex_overrides (err %lu) — restart to apply changes", GetLastError()); return 0; }
+    if (h == INVALID_HANDLE_VALUE) { LOG_ERROR(LogCategory::Live, "Live reload: cannot watch tex_overrides (err %lu) — restart to apply changes", GetLastError()); return 0; }
 
     bool pump = installPump();
     { std::vector<std::string> ignore; std::vector<LiveOp> batch;
       rescanTree(g_overrideDir, "", true, ignore, batch);   // baseline stamps; also catches files added during loading
       if (!batch.empty()) submitBatch(batch); }
-    logf("live reload: watching tex_overrides (%s)", pump ? "full: edits and new files" : "edits only: no main-thread pump, new files need a restart");
+    LOG_INFO(LogCategory::Live, "Directory watcher active (%s)", pump ? "full: edits and new files" : "edits only: new files need restart");
 
     for (;;) {
         DWORD w = WaitForSingleObject(h, g_journalClearAt ? 1000 : INFINITE);
@@ -1299,17 +1412,17 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             ULONGLONG ms = GetTickCount64() - w0;
             if (!InterlockedExchange(&g_waitLogged, 1)) {
                 if (r == WAIT_TIMEOUT)
-                    logf("the file scan is still running after 5 minutes — registering what it has so far");
+                    LOG_WARN(LogCategory::Core, "File scan still running after 5 minutes; registering partial results");
                 else if (ms >= 100)
-                    logf("the game was ready for these files %.1fs before the scan was, so it waited that long. Everything before that point ran alongside the game's own startup and cost you nothing.", ms / 1000.0);
+                    LOG_INFO(LogCategory::Core, "Game ready for files %.1fs before scan finished; waited", ms / 1000.0);
                 else
-                    logf("the scan finished before the game needed it: no waiting at all, the whole scan ran alongside startup");
+                    LOG_INFO(LogCategory::Core, "Scan finished before game needed it (no startup delay)");
             }
         }
         EnterCriticalSection(&g_cs);
 
         // capture the flag values a real streamed call uses
-        if (!g_captured) { g_b1 = b1; g_b2 = b2; g_captured = true; logf("captured flags: b1=%d b2=%d", (int)b1, (int)b2); }
+        if (!g_captured) { g_b1 = b1; g_b2 = b2; g_captured = true; LOG_DEBUG(LogCategory::Core, "Captured streaming flags: b1=%d b2=%d", (int)b1, (int)b2); }
 
         // once the stream system is live (first call), register our files as base slot overrides.
         // o_regRaw is the trampoline (original), so these calls do NOT re-enter this hook.
@@ -1319,7 +1432,7 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             // the pool must exist by now (this very call registers into it); if it looks wrong,
             // the manager pattern matched the wrong code — better no re-assert than a wild write
             if (g_mgr && (!g_mgr->entries || g_mgr->numEntries <= 0 || g_mgr->numEntries > 10000000)) {
-                logf("streaming pool looks wrong (entries=%p num=%d) — re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
+                LOG_WARN(LogCategory::Core, "Streaming pool looks invalid (entries=%p num=%d); re-assert disabled", (void*)g_mgr->entries, g_mgr->numEntries);
                 g_mgr = nullptr;
             }
             int direct = 0, takeovers = 0, waiting = 0, rejected = 0, aliased = 0, shown = 0;
@@ -1356,27 +1469,29 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                     else if (occupied == OCCUPIED_WAITING) ++waiting;
                     else ++rejected;
                 }
-                if (++shown <= 60) {
+                if (g_minLogLevel == LogLevel::Debug || ++shown <= 10) {
                     if (id != 0xFFFFFFFF && ov.altId != 0xFFFFFFFF)
-                        logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x; store resolves this name to id=%u, pinning both)", ov.slot, rel(ov.file), id, ov.handle, ov.altId);
+                        LOG_INFO(LogCategory::Claim, "OVERRIDE-REG: %s <- tex_overrides/%s (id=%u handle=%08x; store resolves to id=%u, pinning both)", ov.slot, rel(ov.file), id, ov.handle, ov.altId);
                     else if (id != 0xFFFFFFFF)
-                        logf("OVERRIDE-REG  %s  <-  tex_overrides/%s  (id=%u handle=%08x)", ov.slot, rel(ov.file), id, ov.handle);
+                        LOG_INFO(LogCategory::Claim, "OVERRIDE-REG: %s <- tex_overrides/%s (id=%u handle=%08x)", ov.slot, rel(ov.file), id, ov.handle);
                     else if (occupied == OCCUPIED_ATTACHED)
-                        logf("OVERRIDE-TAKEOVER  %s  <-  tex_overrides/%s  (id=%u raw handle=%08x)", ov.slot, rel(ov.file), ov.id, ov.handle);
+                        LOG_INFO(LogCategory::Claim, "OVERRIDE-TAKEOVER: %s <- tex_overrides/%s (id=%u raw handle=%08x)", ov.slot, rel(ov.file), ov.id, ov.handle);
                     else if (occupied == OCCUPIED_WAITING)
-                        logf("OVERRIDE-WAIT  %s  <-  tex_overrides/%s  (raw handle=%08x; target not present yet)", ov.slot, rel(ov.file), ov.handle);
+                        LOG_INFO(LogCategory::Claim, "OVERRIDE-WAIT: %s <- tex_overrides/%s (raw handle=%08x; target not present yet)", ov.slot, rel(ov.file), ov.handle);
                     else
-                        logf("OVERRIDE-FAILED  %s  <-  tex_overrides/%s  (registration rejected; no usable raw entry)", ov.slot, rel(ov.file));
+                        LOG_ERROR(LogCategory::Claim, "OVERRIDE-FAILED: %s <- tex_overrides/%s (registration rejected; no usable raw entry)", ov.slot, rel(ov.file));
                 }
             }
             InterlockedExchange(&g_journalHot, 0);
             DeleteFileA(g_inflightPath);   // whole loop survived; nothing to quarantine
-            logf("claimed %d base-slot override(s): %d direct, %d occupied-slot takeover, %d waiting for target, %d rejected",
-                 direct + takeovers + waiting, direct, takeovers, waiting, rejected);
-            if (aliased) logf("%d of those named a slot the game already owned under a different id; the plugin pins both", aliased);
+            if (g_ovs.size() > 10 && g_minLogLevel != LogLevel::Debug) {
+                LOG_INFO(LogCategory::Claim, "  ...and %zu more override(s) registered directly", g_ovs.size() - 10);
+            }
+            LOG_INFO(LogCategory::Claim, "Claimed %d base-slot override(s): %d direct, %d occupied-slot takeover, %d waiting for target, %d rejected",
+                     direct + takeovers + waiting, direct, takeovers, waiting, rejected);
+            if (aliased) LOG_INFO(LogCategory::Claim, "%d of those named a slot the game already owned under a different id; pinned both", aliased);
 
-            // Per type, uncapped. The per-file lines stop at 60, so on a big pack a whole file
-            // type can fail without one line of its own ever being printed.
+            // Per type summary
             { std::unordered_map<std::string, int> byExt, aliasByExt, deadByExt;
               for (auto& ov : g_ovs) {
                   const char* dot = strrchr(ov.slot, '.');
@@ -1386,13 +1501,13 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                   if (ov.id == 0xFFFFFFFF && ov.altId == 0xFFFFFFFF) ++deadByExt[ext];
               }
               for (auto& kv : byExt)
-                  logf("  .%-4s %4d file(s), %d also pinned under the name's own id, %d with no slot at all",
-                       kv.first.c_str(), kv.second, aliasByExt[kv.first], deadByExt[kv.first]); }
+                  LOG_INFO(LogCategory::Claim, "  .%-4s %4d file(s), %d also pinned under name's own id, %d with no slot at all",
+                           kv.first.c_str(), kv.second, aliasByExt[kv.first], deadByExt[kv.first]); }
 
             // Read the pool back. A claim can report success and leave the entry pointing at the
             // game's own file, which every other line in this log would call healthy.
             if (g_mgr && g_mgr->entries) {
-                int pointing = 0, elsewhere = 0, nohandle = 0, shownBad = 0;
+                int pointing = 0, elsewhere = 0, nohandle = 0;
                 for (auto& ov : g_ovs) {
                     if (!ov.handle) { ++nohandle; continue; }
                     bool any = false, all = true;
@@ -1405,31 +1520,30 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
                     if (all) ++pointing;
                     else {
                         ++elsewhere;
-                        if (++shownBad <= 10)
-                            logf("  NOT OURS YET  %s (id=%u alt=%u ours=%08x, pool holds %08x)", ov.slot, ov.id, ov.altId,
+                        LOG_WARN(LogCategory::Verify, "  NOT OURS YET: %s (id=%u alt=%u ours=%08x, pool holds %08x)", ov.slot, ov.id, ov.altId,
                                  ov.handle, g_mgr->entries[ov.id < (uint32_t)g_mgr->numEntries ? ov.id : 0].handle);
                     }
                 }
-                logf("verify: %d slot(s) now point at your file, %d still point at the game's, %d got no handle. The beat re-asserts the second group once a second.",
-                     pointing, elsewhere, nohandle);
+                LOG_INFO(LogCategory::Verify, "Status: %d slot(s) pointing to user files, %d still point to game files (re-asserted each second), %d unassigned",
+                         pointing, elsewhere, nohandle);
 
                 // Owning the slot is only half of it. If the game already has the asset in memory
                 // it will not read the handle again, so the swap is invisible no matter how
                 // correct every line above is. Count how many of ours are already resident.
-                { int resident = 0, pending = 0, cold = 0, pinned = 0, shownHot = 0;
+                { int resident = 0, pending = 0, cold = 0, pinned = 0;
                   for (auto& ov : g_ovs) {
                       if (ov.id >= (uint32_t)g_mgr->numEntries) continue;
                       uint32_t f = g_mgr->entries[ov.id].flags;
                       if ((f & 3) == 1) ++resident; else if ((f & 3) == 0) ++cold; else ++pending;
                       if ((f >> 16) & 1) ++pinned;
-                      if ((f & 3) == 1 && ++shownHot <= 10)
-                          logf("  ALREADY IN MEMORY  %s (status=%s, strflags=%04x, deps=%u) — the game will not re-read this one until it drops it",
-                               ov.slot, strStatusText(f), (unsigned)(f >> 16), (unsigned)((f >> 2) & 0x3FFF));
+                      if ((f & 3) == 1)
+                          LOG_WARN(LogCategory::Verify, "  ALREADY IN MEMORY: %s (status=%s, strflags=%04x, deps=%u) — game will reload when re-equipped",
+                                   ov.slot, strStatusText(f), (unsigned)(f >> 16), (unsigned)((f >> 2) & 0x3FFF));
                   }
-                  logf("residency at claim time: %d already loaded, %d loading, %d not loaded, %d marked do-not-delete",
-                       resident, pending, cold, pinned); }
+                  LOG_INFO(LogCategory::Verify, "Residency at claim time: %d resident in memory, %d loading, %d cold, %d persistent",
+                           resident, pending, cold, pinned); }
             }
-            if (g_mgr) logf("streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
+            if (g_mgr) LOG_DEBUG(LogCategory::Verify, "Streaming pool: entries=%p numEntries=%d", (void*)g_mgr->entries, g_mgr->numEntries);
             InterlockedExchange(&g_idsReady, 1);
         }
 
@@ -1438,29 +1552,38 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
         // server never streamed, and a user's log is the only way we ever learn about a naming
         // family the gate does not know yet. That is how the folder whitelist died in 0.8.5.
         //
-        // The tag is worked out from the COLLECTION, not from whichever file happened to arrive
-        // first. isAllowedKey answers a question about one file; using its answer as the label for
-        // the whole collection mislabelled any collection whose first streamed file was oddly
-        // named. Three states, because for a collection that is neither freemode/a_c_ nor blocked
-        // the answer genuinely depends on the file names inside it.
+        // Two axes, and they are not the same question: classifyCollection says WHAT the thing is,
+        // the reach tag says whether we would ever touch it. Reach is worked out from the
+        // COLLECTION, never from isAllowedKey on whichever file streamed first, which mislabelled
+        // any collection whose first file happened to be oddly named. It has three states, because
+        // for a collection that is neither freemode/a_c_ nor blocked the answer really does depend
+        // on the file names inside it.
         //
-        // Root files are not collections at all, so they are listed under their own heading
-        // instead of being run through collectionOf, which returns the whole filename for them.
+        // Root files are not collections, so they get their own line instead of going through
+        // collectionOf, which returns the whole filename for them.
         std::string keyLower = lower(asName);
         bool rootFile = keyLower.find('/') == std::string::npos;
         std::string coll = rootFile ? keyLower : collectionOf(keyLower);
 
         if (g_collSeen.insert(coll).second) {
-            const char* tag;
-            if (rootFile)                       tag = isAllowedKey(keyLower) ? "overridable" : "OTHER - never touched";
-            else if (isPedCollection(coll))     tag = "overridable";
-            else if (isBlockedCollection(coll)) tag = "OTHER - never touched";
-            else                                tag = "depends on the file names inside";
-            logf("%s: %-40s [%s]", rootFile ? "file      " : "collection", coll.c_str(), tag);
-            // the old cap stopped logging at 500 and said nothing, so the tail looked like a
-            // server that streams nothing. Say it out loud instead.
+            if (rootFile) {
+                LOG_INFO(LogCategory::Collection, "Server file:       %-40s [%s]", coll.c_str(),
+                         isAllowedKey(keyLower) ? "overridable, put yours in tex_overrides/"
+                                                : "OTHER - never touched");
+            } else if (isPedCollection(coll)) {
+                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [overridable] -> tex_overrides/%s/",
+                         coll.c_str(), classifyCollection(coll), coll.c_str());
+            } else if (isBlockedCollection(coll)) {
+                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [OTHER - never touched]",
+                         coll.c_str(), classifyCollection(coll));
+            } else {
+                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [depends on the file names inside] -> tex_overrides/%s/",
+                         coll.c_str(), classifyCollection(coll), coll.c_str());
+            }
+            // the old cap stopped logging at 500 and said nothing, so the tail read like a server
+            // that streams nothing at all. Say it out loud instead.
             if (g_collSeen.size() == 500)
-                logf("collection: 500 distinct names logged, the rest will not be listed");
+                LOG_WARN(LogCategory::Collection, "500 distinct names logged, the rest will not be listed");
         }
 
         LeaveCriticalSection(&g_cs);
@@ -1481,8 +1604,9 @@ static uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const cha
             LeaveCriticalSection(&g_cs);
             if (redirect)
             {
-                InterlockedIncrement(&g_redirects);
-                if (g_redirects <= 100) logf("REDIRECT  %s  ->  tex_overrides/%s", asName, rel(redirect));
+                long n = InterlockedIncrement(&g_redirects);
+                if (n <= 100)       LOG_INFO(LogCategory::Claim, "REDIRECT %s -> tex_overrides/%s", asName, rel(redirect));
+                else if (n == 101)  LOG_INFO(LogCategory::Claim, "REDIRECT: 100 logged, the rest are counted but not listed");
                 return o_regRaw(fileId, redirect, b1, asName, b2);
             }
         }
@@ -1548,16 +1672,16 @@ static void probeVram()
     typedef HRESULT (WINAPI* CreateFactory_t)(REFIID, void**);
     char dxPath[MAX_PATH + 16];
     UINT sl = GetSystemDirectoryA(dxPath, MAX_PATH);
-    if (sl == 0 || sl >= MAX_PATH) { logf("budget: cannot locate System32"); return; }
+    if (sl == 0 || sl >= MAX_PATH) { LOG_WARN(LogCategory::Audit, "Texture budget: Cannot locate System32"); return; }
     strcat_s(dxPath, "\\dxgi.dll");
     HMODULE dx = LoadLibraryA(dxPath);
-    if (!dx) { logf("budget: cannot load %s (err %lu)", dxPath, GetLastError()); return; }
+    if (!dx) { LOG_WARN(LogCategory::Audit, "Texture budget: Cannot load %s (err %lu)", dxPath, GetLastError()); return; }
     auto createFactory = (CreateFactory_t)GetProcAddress(dx, "CreateDXGIFactory1");
-    if (!createFactory) { logf("budget: dxgi.dll has no CreateDXGIFactory1"); return; }
+    if (!createFactory) { LOG_WARN(LogCategory::Audit, "Texture budget: dxgi.dll has no CreateDXGIFactory1"); return; }
 
     IDXGIFactory1* f = nullptr;
     HRESULT hr = createFactory(__uuidof(IDXGIFactory1), (void**)&f);
-    if (FAILED(hr) || !f) { logf("budget: CreateDXGIFactory1 failed (hr 0x%08lX)", (unsigned long)hr); return; }
+    if (FAILED(hr) || !f) { LOG_WARN(LogCategory::Audit, "Texture budget: CreateDXGIFactory1 failed (hr 0x%08lX)", (unsigned long)hr); return; }
     IDXGIAdapter1* a = nullptr; IDXGIAdapter1* best = nullptr;
     for (UINT i = 0; f->EnumAdapters1(i, &a) == S_OK; ++i) {
         DXGI_ADAPTER_DESC1 d;
@@ -1568,7 +1692,7 @@ static void probeVram()
         }
         a->Release();
     }
-    if (!best) logf("budget: DXGI listed no hardware adapter");
+    if (!best) LOG_WARN(LogCategory::Audit, "Texture budget: DXGI listed no hardware adapter");
     if (best) {
         IDXGIAdapter3* a3 = nullptr;   // DXGI 1.4, so Windows 10 and up; older just keeps 0 here
         if (SUCCEEDED(best->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&a3)) && a3) {
@@ -1636,8 +1760,8 @@ static void budgetBeatImpl()
         g_vramTable[i]     = g_budget / 2;
     }
     if (++g_budgetWrites <= 10)
-        logf("texture budget: %.1f -> %.1f GB%s", old / 1073741824.0, g_budget / 1073741824.0,
-             g_budgetWrites == 1 ? "" : " (re-asserted; the settings screen rewrote it)");
+        LOG_DEBUG(LogCategory::Audit, "Texture budget re-asserted: %.1f -> %.1f GB%s", old / 1073741824.0, g_budget / 1073741824.0,
+                  g_budgetWrites == 1 ? "" : " (re-asserted; settings screen rewrote it)");
 }
 // Runs once, on the beat thread, because DXGI does not work under DllMain's loader lock. A
 // 0.7.0 crash report proved the stronger version of that: calling it from Setup() did not merely
@@ -1652,37 +1776,37 @@ static void decideBudgetImpl()
     if (g_budgetWant > 0.0) {
         g_budget = (uint64_t)(g_budgetWant * 1073741824.0);
         if (g_vramTotal && g_budget > g_vramTotal) {
-            logf("budget: your card has %.1f GB of VRAM; clamping the requested %.1f GB to that",
-                 g_vramTotal / 1073741824.0, g_budget / 1073741824.0);
+            LOG_WARN(LogCategory::Audit, "Texture budget: Requested %.1f GB exceeds card's %.1f GB VRAM; clamped",
+                     g_budget / 1073741824.0, g_vramTotal / 1073741824.0);
             g_budget = g_vramTotal;
         }
         if (g_budget <= g_budgetCurr) {    // lowering it would only make texture loss worse
-            logf("budget: _budget.txt asks for %.1f GB, which is no more than the %.1f GB the game already gives, so it is left alone (put 0 in that file to turn this off)",
-                 g_budget / 1073741824.0, g_budgetCurr / 1073741824.0);
+            LOG_INFO(LogCategory::Audit, "Texture budget: Requested %.1f GB is <= game's %.1f GB; left unchanged",
+                     g_budget / 1073741824.0, g_budgetCurr / 1073741824.0);
             g_budget = 0;
         }
-        else logf("budget: _budget.txt asked for %.1f GB, raising the texture budget from the %.1f GB the game set",
-                  g_budget / 1073741824.0, g_budgetCurr / 1073741824.0);
+        else LOG_INFO(LogCategory::Audit, "Texture budget: _budget.txt requested %.1f GB (up from %.1f GB)",
+                      g_budget / 1073741824.0, g_budgetCurr / 1073741824.0);
         return;
     }
     g_budget = autoBudget(g_budgetCurr);
     if (g_budget)
-        logf("budget: sized to this PC — %.1f GB, up from the %.1f GB the game set (card %.1f GB, Windows is offering this process %.1f GB right now). Put a number of GB in _budget.txt to pick your own, or 0 to leave it alone.",
-             g_budget / 1073741824.0, g_budgetCurr / 1073741824.0,
-             g_vramTotal / 1073741824.0, g_vramBudget / 1073741824.0);
+        LOG_INFO(LogCategory::Audit, "Texture budget: Sized to this PC — %.1f GB, up from %.1f GB (card: %.1f GB, Windows offering: %.1f GB)",
+                 g_budget / 1073741824.0, g_budgetCurr / 1073741824.0,
+                 g_vramTotal / 1073741824.0, g_vramBudget / 1073741824.0);
     else if (!g_vramTotal && !g_vramBudget)
-        logf("budget: could not read this card's memory (see the line above), so the texture budget is left as the game set it (%.1f GB). Put a number of GB in _budget.txt to raise it by hand.", g_budgetCurr / 1073741824.0);
+        LOG_WARN(LogCategory::Audit, "Texture budget: Could not query card memory; left at game default (%.1f GB)", g_budgetCurr / 1073741824.0);
     else
-        logf("budget: the %.1f GB the game already gives is as much as this card can spare, leaving it alone (card %.1f GB, Windows is offering %.1f GB)",
-             g_budgetCurr / 1073741824.0, g_vramTotal / 1073741824.0, g_vramBudget / 1073741824.0);
+        LOG_INFO(LogCategory::Audit, "Texture budget: Game default %.1f GB is optimal for this GPU (card: %.1f GB, Windows offering: %.1f GB)",
+                 g_budgetCurr / 1073741824.0, g_vramTotal / 1073741824.0, g_vramBudget / 1073741824.0);
 }
 static void decideBudget()
 {
     __try { decideBudgetImpl(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         g_budget = 0;
-        logf("budget: FAULT reading this card (code %08X) — texture budget left as the game set it, everything else still works",
-             (unsigned)GetExceptionCode());
+        LOG_WARN(LogCategory::Audit, "Texture budget: Fault reading card memory (code %08X); left at game default",
+                 (unsigned)GetExceptionCode());
     }
 }
 
@@ -1692,7 +1816,7 @@ static void budgetBeat()
     __try { budgetBeatImpl(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         InterlockedExchange(&g_budgetFault, 1);
-        logf("budget: FAULT writing the table — raised budget disabled for this session");
+        LOG_ERROR(LogCategory::Audit, "Texture budget: Fault writing budget table; raised budget disabled for session");
     }
 }
 
@@ -1701,12 +1825,11 @@ static void budgetBeat()
 static void costReport()
 {
     if (g_costVirt + g_costPhys) {
-        logf("pack cost when fully loaded: %.1f MB of texture memory + %.1f MB other. Vanilla clothing files stay well under 2 MB each; a heavy pack feeds the \"stuck on low detail / textures gone\" bug on busy servers.",
-             g_costPhys / 1048576.0, g_costVirt / 1048576.0);
+        LOG_INFO(LogCategory::Audit, "Pack cost when fully loaded: %.1f MB texture memory + %.1f MB virtual memory",
+                 g_costPhys / 1048576.0, g_costVirt / 1048576.0);
         std::sort(g_costBig.rbegin(), g_costBig.rend());
-        for (size_t i = 0; i < g_costBig.size() && i < 20; ++i)
-            logf("  HEAVY %6.1f MB  %s — likely 4K or uncompressed; shrink it to fight texture loss", g_costBig[i].first / 1048576.0, g_costBig[i].second.c_str());
-        if (g_costBig.size() > 20) logf("  ...and %zu more file(s) over 8 MB", g_costBig.size() - 20);
+        for (const auto& item : g_costBig)
+            LOG_WARN(LogCategory::Audit, "  HEAVY %6.1f MB  %s (likely 4K or uncompressed; shrink to fight texture loss)", item.first / 1048576.0, item.second.c_str());
         // Past ~1 GB the pack no longer fits the budget, and eviction inside GTA5.exe is
         // passive-only (cfx #3874), so the pool saturates and the whole world drops to low LOD.
         // That is the "textures not loading" report from players who never crash. The ceiling is
@@ -1717,11 +1840,11 @@ static void costReport()
         // compare against what the game is giving RIGHT NOW; the budget line on the first beat
         // reports separately whether that ceiling then got raised
         if (g_costPhys >= (1024ull << 20) && g_budgetCurr) {
-            logf("  the game is currently giving textures %.1f GB in total, and that has to cover the whole world, not just your pack. %s",
-                 g_budgetCurr / 1073741824.0,
-                 g_costPhys < g_budgetCurr / 2
-                   ? "Your pack fits with room to spare."
-                   : "Your pack takes a large share of that, which is what makes textures drop out. Shrink the HEAVY files above (CodeWalker, Tools, Shrink Textures).");
+            LOG_INFO(LogCategory::Audit, "  Texture pool: Game allocation is %.1f GB. %s",
+                     g_budgetCurr / 1073741824.0,
+                     g_costPhys < g_budgetCurr / 2
+                       ? "Pack fits with room to spare."
+                       : "Pack takes a large share of budget; shrink HEAVY files if texture loss occurs.");
         }
     }
 }
@@ -1736,15 +1859,15 @@ static void locateRuntimePatterns()
     uint8_t* vram = scanModule(PAT_VRAM, 13);
     uint64_t* table = vram ? (uint64_t*)ripTarget(vram + 6) : nullptr;
     if (table && vramTableSane(table, &g_budgetCurr)) g_vramTable = table;
-    else logf("budget: vram table %s — texture budget left alone, everything else still works",
-              vram ? "failed the sanity check" : "pattern NOT FOUND");
+    else LOG_WARN(LogCategory::Audit, "Texture budget: VRAM table %s; budget adjustment disabled",
+                  vram ? "failed sanity check" : "pattern NOT FOUND");
 
     const short PAT_MGR[] = { 0x74,0x1A,0x8B,0x15,-1,-1,-1,-1,0x48,0x8D,0x0D,-1,-1,-1,-1,0x41 };
     if (uint8_t* q = scanModule(PAT_MGR, 16)) {
         g_mgr = (StrMgr*)ripTarget(q + 11);
-        logf("streaming manager @ %p", (void*)g_mgr);
+        LOG_INFO(LogCategory::Core, "Streaming manager @ %p", (void*)g_mgr);
     }
-    else logf("manager pattern NOT FOUND — claims still register, but nothing can re-assert them");
+    else LOG_WARN(LogCategory::Core, "Streaming manager pattern NOT FOUND — overrides will register but cannot re-assert");
 
     const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
     if (uint8_t* q = scanModule(PAT_GRS, 19)) {
@@ -1752,8 +1875,8 @@ static void locateRuntimePatterns()
     }
     const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
     if (uint8_t* q = scanModule(PAT_GE, 12)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
-    logf("live reload: rawStreamer=%s getEntry=%s",
-         g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING");
+    LOG_INFO(LogCategory::Live, "Occupied-slot exports: rawStreamer=%s getEntry=%s",
+             g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING");
 }
 
 // _budget.txt and the placement .xml files are user files too, so they are read out here with
@@ -1770,7 +1893,7 @@ static void readBudgetFile()
         if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
         else {
             g_budgetWant = 0.0;
-            logf("budget: _budget.txt does not hold a number of GB between 1 and 48, so the texture budget is left exactly as the game set it");
+            LOG_WARN(LogCategory::Audit, "Texture budget: _budget.txt does not hold a valid number (1-48 GB); left at game default");
         }
     }
 }
@@ -1784,7 +1907,7 @@ static void loadPlacementFiles()
         FindClose(h);
     }
     for (auto& pc : g_pl)
-        logf("placement: collection %s — %zu preset(s) from %s", pc.name.c_str(), pc.presets.size(), pc.src.c_str());
+        LOG_INFO(LogCategory::Tattoo, "Loaded placement file: %s (%zu presets for %s)", pc.src.c_str(), pc.presets.size(), pc.name.c_str());
 }
 
 static void Setup()
@@ -1798,7 +1921,19 @@ static void Setup()
       g_off = (GetFileAttributesA(off.c_str()) != INVALID_FILE_ATTRIBUTES); }
     _snprintf_s(g_inflightPath,   MAX_PATH, _TRUNCATE, "%s_inflight.txt",   g_overrideDir);
     _snprintf_s(g_quarantinePath, MAX_PATH, _TRUNCATE, "%s_quarantine.txt", g_overrideDir);
+    InitializeCriticalSection(&g_logCs);
+    g_logCsInit = true;
     InitializeCriticalSection(&g_cs);   // must exist before the hook can fire
+
+    // check for verbose / debug logging triggers
+    {
+        std::string verb = std::string(g_overrideDir) + "_verbose.txt";
+        std::string dbg  = std::string(g_overrideDir) + "_debug.txt";
+        if (GetFileAttributesA(verb.c_str()) != INVALID_FILE_ATTRIBUTES ||
+            GetFileAttributesA(dbg.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            g_minLogLevel = LogLevel::Debug;
+        }
+    }
 
     // fresh log every launch, but keep one previous generation: after a crash the next launch
     // used to destroy the exact log that showed what the crashed session was doing
@@ -1809,50 +1944,52 @@ static void Setup()
     }
     { time_t t = time(nullptr); struct tm tm; localtime_s(&tm, &t);
       char d[32]; strftime(d, sizeof d, "%Y-%m-%d", &tm);
-      logf("================ texoverride " TEXOVERRIDE_VERSION " loaded (%s) ================", d); }
+      LOG_INFO(LogCategory::Core, "texoverride " TEXOVERRIDE_VERSION " initializing (%s, build %d)", d, runningGameBuild()); }
     // The hook waits on this. Every user-file read and every optional pattern scan now happens
     // on the beat thread (backgroundStartup), which sets it when it is done.
     g_scanDone = CreateEventA(nullptr, TRUE, FALSE, nullptr);
 
     resolveOccupiedSlotExports();
-    logf("occupied-slot resolver: manager=%s module=%s rawEntries=%s build=%d",
+    LOG_INFO(LogCategory::Core, "Occupied-slot exports: manager=%s module=%s rawEntries=%s",
          g_getStreamingManagerFn ? "ok" : "MISSING",
          g_getStreamingModuleFn ? "ok" : "MISSING",
-         g_getRawEntriesFn ? "ok" : "MISSING", runningGameBuild());
+         g_getRawEntriesFn ? "ok" : "MISSING");
 
     const short PAT[] = { 0xB2,0x01,0x48,0x8B,0xCD,0x45,0x8A,0xE0,0x4D,0x0F,0x45,0xF9,0xE8 };
     uint8_t* p = scanModule(PAT, sizeof PAT / sizeof *PAT);
-    if (!p) { logf("pattern NOT FOUND"); }
+    if (!p) { LOG_ERROR(LogCategory::Core, "Streaming hook pattern NOT FOUND; plugin disabled for this session"); }
     else {
         void* target = (void*)(p - 0x25);
-        logf("registerRawStreamingFile @ %p", target);
+        LOG_INFO(LogCategory::Core, "registerRawStreamingFile @ %p", target);
         // Every one of these was logged and then ignored. A failed MH_CreateHook leaves o_regRaw
         // null while the hook is live, so the first stream call dereferences it and the game dies
         // on a plugin that already knew it had failed. Bail out instead, and unwind what we own.
-        MH_STATUS s = MH_Initialize();                                    logf("MH_Initialize: %s", MH_StatusToString(s));
+        MH_STATUS s = MH_Initialize();
+        LOG_INFO(LogCategory::Core, "MH_Initialize: %s", MH_StatusToString(s));
         bool ownMh = (s == MH_OK);
         if (s != MH_OK && s != MH_ERROR_ALREADY_INITIALIZED) {
             g_off = true;
-            logf("MinHook would not start, so the plugin does nothing this session and leaves the game alone");
+            LOG_ERROR(LogCategory::Core, "MinHook would not start; plugin disabled for this session");
         }
         else {
             s = MH_CreateHook(target, (void*)&h_regRaw, (void**)&o_regRaw);
-            logf("MH_CreateHook: %s", MH_StatusToString(s));
+            LOG_INFO(LogCategory::Core, "MH_CreateHook: %s", MH_StatusToString(s));
             if (s != MH_OK) {
                 if (ownMh) MH_Uninitialize();
                 g_off = true;
-                logf("the streaming hook could not be created, so the plugin does nothing this session");
+                LOG_ERROR(LogCategory::Core, "Streaming hook could not be created; plugin disabled for this session");
             }
             else {
                 // this hook, not MH_ALL_HOOKS: nothing else in the process is ours to enable
-                s = MH_EnableHook(target);                                logf("MH_EnableHook: %s", MH_StatusToString(s));
+                s = MH_EnableHook(target);
+                LOG_INFO(LogCategory::Core, "MH_EnableHook: %s", MH_StatusToString(s));
                 if (s != MH_OK) {
-                    logf("MH_RemoveHook after enable failure: %s", MH_StatusToString(MH_RemoveHook(target)));
+                    LOG_WARN(LogCategory::Core, "MH_RemoveHook after enable failure: %s", MH_StatusToString(MH_RemoveHook(target)));
                     if (ownMh) MH_Uninitialize();
                     g_off = true;
-                    logf("the streaming hook could not be enabled, so the plugin does nothing this session");
+                    LOG_ERROR(LogCategory::Core, "Streaming hook could not be enabled; plugin disabled for this session");
                 }
-                else logf(g_off ? "hooked, disabled" : "LIVE — will register base overrides on first stream call");
+                else LOG_INFO(LogCategory::Core, g_off ? "Hooked, disabled" : "LIVE — will register base overrides on first stream call");
             }
         }
     }
@@ -1902,11 +2039,11 @@ static DWORD WINAPI UpdateCheck(LPVOID)
         size_t q2 = (q1 == std::string::npos) ? std::string::npos : body.find('"', q1 + 1);
         if (q2 != std::string::npos) latest = body.substr(q1 + 1, q2 - q1 - 1);
     }
-    if (latest.empty()) { logf("update check: could not reach GitHub (offline?)"); return 0; }
+    if (latest.empty()) { LOG_DEBUG(LogCategory::Update, "Update check: could not reach GitHub (offline?)"); return 0; }
     const char* lv = (latest[0] == 'v' || latest[0] == 'V') ? latest.c_str() + 1 : latest.c_str();
 
     if (verCmp(lv, TEXOVERRIDE_VERSION) > 0) {
-        logf("update check: %s is out (you have " TEXOVERRIDE_VERSION ")", latest.c_str());
+        LOG_INFO(LogCategory::Update, "Update available: %s (current: " TEXOVERRIDE_VERSION ")", latest.c_str());
         char msg[256];
         _snprintf_s(msg, sizeof msg, _TRUNCATE,
             "A newer texoverride is out: %s (you have " TEXOVERRIDE_VERSION ").\n\n"
@@ -1918,7 +2055,7 @@ static DWORD WINAPI UpdateCheck(LPVOID)
             ShellExecuteA(nullptr, "open", "https://github.com/blancodagoat/texoverride/releases",
                           nullptr, nullptr, SW_SHOWNORMAL);
     }
-    else logf("update check: up to date (latest %s)", latest.c_str());
+    else LOG_INFO(LogCategory::Update, "Plugin is up to date (latest %s)", latest.c_str());
     return 0;
 }
 
@@ -1934,7 +2071,7 @@ static void backgroundStartup()
     readBudgetFile();
     decideBudget();   // DXGI only works out here, after DllMain has returned
     walkDir(std::string(g_overrideDir), "", g_cands);
-    logf("found %zu file(s); reading their headers in the background while the game starts", g_cands.size());
+    LOG_INFO(LogCategory::Scan, "Discovered %zu candidate file(s); reading headers...", g_cands.size());
     scanFinish();
     loadPlacementFiles();
 }
@@ -1942,8 +2079,8 @@ static void backgroundStartup()
 static bool backgroundStartupCppSafe()
 {
     try { backgroundStartup(); return true; }
-    catch (const std::exception& e) { logf("background startup failed: %s", e.what()); }
-    catch (...) { logf("background startup failed with an unknown C++ exception"); }
+    catch (const std::exception& e) { LOG_ERROR(LogCategory::Core, "Background startup failed: %s", e.what()); }
+    catch (...) { LOG_ERROR(LogCategory::Core, "Background startup failed with an unknown C++ exception"); }
     return false;
 }
 
@@ -1959,15 +2096,17 @@ static void scanFinishSafe()
     bool ok = false;
     __try { ok = backgroundStartupCppSafe(); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        logf("FAULT during background startup (code %08X) — carrying on with whatever was ready", GetExceptionCode());
+        LOG_ERROR(LogCategory::Core, "FAULT during background startup (code %08X); carrying on with available assets", GetExceptionCode());
     }
-    if (!ok) logf("background startup did not finish; only what it had already found is loaded this session");
+    if (!ok) LOG_WARN(LogCategory::Core, "Background startup did not finish; only pre-loaded assets active this session");
     if (g_scanDone) SetEvent(g_scanDone);
 }
 
 static DWORD WINAPI BeatLoop(LPVOID)
 {
     int beatOurs = 0, beatTheirs = 0, beatLoaded = 0;   // ours / re-taken / resident right now
+    long prevReclaims = 0, prevRedirects = 0, prevLateBinds = 0;
+    int prevTheirs = 0;
     scanFinishSafe();   // all user-file reads, optional scans and the budget decision, off the loader lock
     for (int beat = 1;; ++beat) {
         for (int tick = 0; tick < 15; ++tick) {
@@ -1977,7 +2116,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
             if (!g_watcherStarted && !g_off && g_idsReady) {
                 HANDLE w = CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
                 if (w) { g_watcherStarted = true; CloseHandle(w); }
-                else logf("live reload: watcher thread could not start (err %lu), trying again next tick", GetLastError());
+                else LOG_WARN(LogCategory::Live, "Live reload: watcher thread could not start (err %lu), retrying next tick", GetLastError());
             }
             // re-assert: DLC mounts and FiveM's loader re-point claimed slots after us; whoever
             // writes the handle last wins, so write ours back. Same mechanism Cfx's own override
@@ -1993,7 +2132,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
                         if (validStreamingId(appeared)) {
                             ov.id = appeared;
                             if (++g_lateBinds <= 60)
-                                logf("LATE-BIND  %s  (target id=%u raw handle=%08x)", ov.slot, ov.id, ov.handle);
+                                LOG_INFO(LogCategory::Claim, "LATE-BIND: %s (target id=%u raw handle=%08x)", ov.slot, ov.id, ov.handle);
                         }
                     }
                     if (!ov.handle) continue;
@@ -2008,7 +2147,7 @@ static DWORD WINAPI BeatLoop(LPVOID)
                         if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
                         uint32_t old = e.handle;
                         e.handle = ov.handle;
-                        if (++g_reclaims <= 60) logf("RECLAIM  %s  (id=%u, %08x -> %08x)", ov.slot, which, old, ov.handle);
+                        if (++g_reclaims <= 60) LOG_INFO(LogCategory::Claim, "RECLAIM: %s (id=%u, %08x -> %08x)", ov.slot, which, old, ov.handle);
                     }
                 }
                 LeaveCriticalSection(&g_cs);
@@ -2020,9 +2159,23 @@ static DWORD WINAPI BeatLoop(LPVOID)
                 budgetBeat();          // re-assert the raised texture budget (aligned data writes)
             }
         }
-        logf("alive (beat %d) — reg=%ld redirects=%ld lateBinds=%ld reclaims=%ld deferred=%ld slotsHeld=%d contested=%d inMemory=%d baseRegistered=%s",
-             beat, (long)g_regTotal, (long)g_redirects, g_lateBinds, g_reclaims, g_deferred,
-             beatOurs, beatTheirs, beatLoaded, g_didRegister ? "yes" : "no");
+
+        long dReclaims = g_reclaims - prevReclaims;
+        long dRedirects = (long)g_redirects - prevRedirects;
+        long dLateBinds = g_lateBinds - prevLateBinds;
+        bool changed = (dReclaims > 0 || dLateBinds > 0 || beatTheirs != prevTheirs);
+        prevReclaims = g_reclaims;
+        prevRedirects = (long)g_redirects;
+        prevLateBinds = g_lateBinds;
+        prevTheirs = beatTheirs;
+
+        if (changed) {
+            LOG_INFO(LogCategory::Core, "Heartbeat (beat %d): %d held, %d contested, %ld reclaims (+%ld), %ld redirects (+%ld)",
+                     beat, beatOurs, beatTheirs, g_reclaims, dReclaims, (long)g_redirects, dRedirects);
+        } else if (beat % (g_minLogLevel == LogLevel::Debug ? 4 : 20) == 0 || beat == 1) {
+            LOG_INFO(LogCategory::Core, "Heartbeat (beat %d): %d held, %d contested, %d in memory, %ld redirects",
+                     beat, beatOurs, beatTheirs, beatLoaded, (long)g_redirects);
+        }
     }
 }
 
@@ -2036,7 +2189,7 @@ static bool SetupSafe()
     // would convert a clean load failure into an unattributable crash later in game code
     __try { Setup(); return true; }
     __except ((GetExceptionCode() == EXCEPTION_STACK_OVERFLOW) ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER) {
-        logf("FAULT during startup (code %08X) — plugin disabled for this session", GetExceptionCode());
+        LOG_ERROR(LogCategory::Core, "FAULT during startup (code %08X) — plugin disabled for this session", GetExceptionCode());
         g_off = true;
         return false;
     }
@@ -2054,13 +2207,13 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
                 CloseHandle(beat);
                 HANDLE upd = CreateThread(nullptr, 0, UpdateCheck, nullptr, 0, nullptr);
                 if (upd) CloseHandle(upd);
-                else logf("update check thread could not start (err %lu); everything else is unaffected", GetLastError());
+                else LOG_WARN(LogCategory::Update, "Update check thread could not start (err %lu)", GetLastError());
             }
             else {
                 DWORD e = GetLastError();
                 g_off = true;
                 if (g_scanDone) SetEvent(g_scanDone);
-                logf("the plugin's own thread could not start (err %lu), so it does nothing this session", e);
+                LOG_ERROR(LogCategory::Core, "Background beat thread could not start (err %lu); plugin disabled", e);
             }
         }
     }
