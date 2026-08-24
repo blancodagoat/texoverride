@@ -1,10 +1,7 @@
-// Checks the safety gate. The functions under test are lifted out of dllmain.cpp at build time
-// by gate_test.sh, so this cannot drift from the shipping code.
+// Checks the safety gate against src/streaming/gate.h directly.
+#include "../src/streaming/gate.h"
 #include <string>
-#include <set>
 #include <cstdio>
-static std::string lower(std::string s){for(char&c:s)c=(char)tolower((unsigned char)c);return s;}
-#include "gate_extracted.inc"
 
 static int fails = 0;
 static void want(bool got, bool exp, const char* k)
