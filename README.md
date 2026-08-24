@@ -670,13 +670,14 @@ reproducible with the build server building twice and comparing before it publis
 ## Files
 
 ```
-dllmain.cpp             the plugin: folder scan, hook, overrides, tattoo placement
+src/                    modular C++ source (hook, streaming, budget, tattoo placement, live reload, gate)
+dllmain.cpp             plugin entry point (DllMain)
 build.bat               MSVC build
 texoverride.rc          FX_ASI_BUILD stamp
 minhook/                vendored MinHook with the Freeze() patch
 COLLECTIONS.md          every valid collection folder name, characters and animals
 tools/make-zip.ps1      packs the release zip, folder list read from COLLECTIONS.md
-tools/gate_test.bat     runs the safety-gate cases against the real code in dllmain.cpp
+tools/gate_test.bat     runs the safety-gate cases against the real code in src/gate.h
 docs/overlay_index.tsv  every vanilla tattoo and overlay: name, file, position, texture
 docs/client-side-dlc-packs.md  how to run a DLC pack client side on FiveM (not texoverride)
 CHANGELOG.md            what changed in each version

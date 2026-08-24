@@ -14,11 +14,11 @@ It exists because FiveM's own client mod paths (mods/ folder, pseudo-DLC wrappin
 cannot deliver ped textures — they drain before the connect handshake, and the pseudo-DLC mount is
 non-overlay. This works at the streaming layer instead.
 
-Repo: github.com/blancodagoat/texoverride (owner blancodagoat). Single-file plugin: `dllmain.cpp`.
+Repo: github.com/blancodagoat/texoverride (owner blancodagoat). Modular plugin: `src/` and `dllmain.cpp`.
 Latest tag at time of writing: v0.8.7 (0.8.8 is in the changelog, not tagged yet). Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx
 signature a self-built ASI lacks; level 2 disables the ASI loader).
 
-## The four override mechanisms (all in dllmain.cpp)
+## The four override mechanisms (in src/)
 
 1. **Clothing** — `tex_overrides/<collection>/<file>.ydd|.ytd`. The folder names a freemode-ped
    collection (see COLLECTIONS.md, 186 valid names). Registered under `collection/file` and
@@ -206,12 +206,12 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   refusal makes a pack silently half apply, which reads as a broken plugin and costs more support
   than the crash. The crash it guarded is real (summer-maine-steak, twice: 64 MB graphics
   segments, then 77+ MB virtual), so if oversized-file crashes come back, `cannotLoad` in
-  dllmain.cpp is where the refusal goes. Unreadable files are still refused, since there is
+  `src/rsc.cpp` is where the refusal goes. Unreadable files are still refused, since there is
   nothing to load. The startup crash saver is what replaces it: whatever the bad
   file is, oversized or not, it costs one launch instead of every launch.
 - **Cost audit (0.5.2)**: every .ytd/.ydd on disk is an RSC7 resource; header dwords 2/3
   (system/graphics flags) encode the exact resident memory via CodeWalker's `GetSizeFromFlags`
-  (`rscSizeFromFlags` in dllmain.cpp — pages sum x (0x200 << shift)). scanDir totals it, logs
+  (`rscSizeFromFlags` in `src/rsc.cpp` — pages sum x (0x200 << shift)). scanDir totals it, logs
   `pack cost when fully loaded` + `HEAVY` lines for files >= 8 MB (catches 4K anything and 2K
   uncompressed; vanilla clothing txds are under 2 MB).
 - **Budget raiser (0.6.0 opt-in, AUTO by default since 0.7.0)**: the budget is a data table in GTA5.exe — 20 rows x 4 uint64
@@ -343,7 +343,7 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
   no /clr. The user's shell prints `fastfetch`/`vswhere` noise and exits nonzero even on success;
   trust the `Built texoverride.asi` line, not the exit code.
 - `.asi` is gitignored — CI builds it and attaches it to the GitHub Release. Never commit the .asi.
-- Release: bump `TEXOVERRIDE_VERSION` in dllmain.cpp AND `FILEVERSION`/`PRODUCTVERSION`/the two
+- Release: bump `TEXOVERRIDE_VERSION` in `src/version.h` AND `FILEVERSION`/`PRODUCTVERSION`/the two
   version strings in `texoverride.rc` (they must match), date the CHANGELOG section, commit, push,
   `git tag vX.Y.Z`, push the tag. CI builds both the push and the tag; the tag build makes the
   release with the changelog notes + the .asi.
