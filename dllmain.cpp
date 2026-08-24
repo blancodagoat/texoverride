@@ -1919,6 +1919,9 @@ static void Setup()
     _snprintf_s(g_overrideDir, MAX_PATH, _TRUNCATE, "%s\\tex_overrides\\", plug.c_str());
     { std::string off = std::string(g_overrideDir) + "_OFF";
       g_off = (GetFileAttributesA(off.c_str()) != INVALID_FILE_ATTRIBUTES); }
+    // _OFF is the diagnostic control. Stop before logs, events, scans, hooks or worker threads
+    // so it behaves like an installed but unloaded plugin rather than a bypass inside the hook.
+    if (g_off) return;
     _snprintf_s(g_inflightPath,   MAX_PATH, _TRUNCATE, "%s_inflight.txt",   g_overrideDir);
     _snprintf_s(g_quarantinePath, MAX_PATH, _TRUNCATE, "%s_quarantine.txt", g_overrideDir);
     InitializeCriticalSection(&g_logCs);
@@ -2199,7 +2202,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = h; DisableThreadLibraryCalls(h);
-        if (SetupSafe()) {   // synchronous: must finish before the game's entry point runs (see Setup)
+        if (SetupSafe() && !g_off) {   // synchronous: must finish before the game's entry point runs (see Setup)
             // If the beat thread never starts, scanFinishSafe never runs, g_scanDone is never set
             // and the first stream call sits in its 5 minute wait for nothing. Signal it and stop.
             HANDLE beat = CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
