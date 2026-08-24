@@ -389,6 +389,30 @@ A bigger ceiling buys headroom before the bug hits. It does not remove the bug, 
 GTA itself, and it cannot make a pack fit that is simply too big. Shrinking the files in the
 `HEAVY` list is still the fix that always works.
 
+## Loading a managed pack as one snapshot
+
+Pack authors can put `_gtaw_pack_manifest.tsv` at the root of `tex_overrides` when every file in a
+clothing pack needs to arrive together. The TSV needs these columns:
+
+```
+row_key	target_relative_path	size
+```
+
+Quoted fields written by PowerShell's `Export-Csv` with a tab delimiter are accepted. Extra
+columns are allowed. If both `virtual_bytes` and `physical_bytes` are present, texoverride also
+checks those values against each resource's RSC7 header.
+
+Once the manifest is present, it is a fail-closed contract. Every allowed override file on disk
+must have one unique manifest row, every manifest path must exist, and its byte size must match.
+An unsafe path, malformed row, missing file, extra file, quarantine entry, bad RSC7 header or cost
+mismatch refuses the whole managed pack for that launch. The log starts the reason with `MANAGED
+PACK REFUSED`. This prevents a drawable from loading on its own while its texture set is missing.
+
+Managed packs are static between launches. Texoverride does not start its directory watcher or
+`PeekMessageW` message hook in this mode, so changing a resource or the manifest needs a FiveM
+restart. Close FiveM and replace the complete `tex_overrides` directory as one unit when updating
+the pack. Without this manifest, startup and live reload behave as before.
+
 ## Turning it off
 
 Create an empty file named `_OFF` (no file extension) inside `tex_overrides` and restart FiveM.

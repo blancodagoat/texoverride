@@ -18,6 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test managed-pack manifest
+        shell: cmd
+        run: tools\pack_manifest_test.bat
+
       - name: Build
         shell: cmd
         run: build.bat

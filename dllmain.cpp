@@ -47,9 +47,11 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
+#include <cerrno>
 #include <cmath>
 #include <ctime>
 #include <algorithm>
+#include <fstream>
 #include "MinHook.h"
 
 static HINSTANCE g_self;
@@ -98,7 +100,9 @@ static std::unordered_set<std::string> g_collSeen;   // distinct collections, fo
 static std::unordered_set<std::string> g_quarantine; // crash saver: keys refused this session
 static bool g_crashSaverRan = false;                  // gates journal deletion on orderly exit
 static volatile LONG g_journalHot = 0;                // startup registration is mid-flight in the journal
-static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH];
+static char g_inflightPath[MAX_PATH], g_quarantinePath[MAX_PATH], g_packManifestPath[MAX_PATH];
+static bool g_packManifestActive = false;              // managed packs load as a complete startup snapshot
+static bool g_packManifestReady = false;
 
 // ---- streaming-cost audit ------------------------------------------------------------------
 // A .ytd/.ydd on disk is an RSC7 resource: dwords 2 (virtual) and 3 (physical) of the 16-byte
@@ -482,6 +486,193 @@ static bool isIgnoredType(const std::string& ln, const std::string& rel, bool an
 
 // The walk itself opens nothing: it only decides which names are ours.
 struct Cand { std::string slot, full; Cost c; };
+
+struct PackExpected {
+    uint64_t size = 0, cv = 0, cp = 0;
+    bool hasCost = false;
+};
+static std::unordered_map<std::string, PackExpected> g_packExpected;
+
+// Export-Csv quotes every field, so this accepts both plain TSV and strict CSV-style quoted TSV.
+// Quotes may only wrap a complete field; doubled quotes inside one quoted field become one quote.
+static bool splitManifestTsv(const std::string& line, std::vector<std::string>& fields)
+{
+    fields.clear();
+    size_t i = 0;
+    for (;;) {
+        std::string field;
+        if (i < line.size() && line[i] == '"') {
+            ++i;
+            bool closed = false;
+            while (i < line.size()) {
+                if (line[i] != '"') { field.push_back(line[i++]); continue; }
+                if (i + 1 < line.size() && line[i + 1] == '"') { field.push_back('"'); i += 2; continue; }
+                ++i; closed = true; break;
+            }
+            if (!closed || (i < line.size() && line[i] != '\t')) return false;
+        }
+        else {
+            while (i < line.size() && line[i] != '\t') {
+                if (line[i] == '"') return false;
+                field.push_back(line[i++]);
+            }
+        }
+        fields.push_back(field);
+        if (i == line.size()) return true;
+        ++i;
+        if (i == line.size()) { fields.push_back(""); return true; }
+    }
+}
+
+static bool parseManifestUint64(const std::string& text, uint64_t& value, bool allowZero = false)
+{
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos) return false;
+    errno = 0;
+    char* end = nullptr;
+    unsigned __int64 parsed = _strtoui64(text.c_str(), &end, 10);
+    if (errno == ERANGE || !end || *end || (!allowZero && parsed == 0)) return false;
+    value = (uint64_t)parsed;
+    return true;
+}
+
+static bool safeManifestPath(std::string& path)
+{
+    for (char& c : path) if (c == '\\') c = '/';
+    path = lower(path);
+    if (path.empty() || path[0] == '/' || path.find(':') != std::string::npos) return false;
+    size_t start = 0;
+    for (;;) {
+        size_t slash = path.find('/', start);
+        std::string part = path.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+        if (part.empty() || part == "." || part == "..") return false;
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+    return isAllowedKey(path);
+}
+
+static bool readPackManifest(const char* path, const std::vector<Cand>& candidates,
+                             std::unordered_map<std::string, PackExpected>& expected,
+                             size_t& groups, std::string& problem)
+{
+    expected.clear(); groups = 0; problem.clear();
+    std::ifstream in(path, std::ios::in | std::ios::binary);
+    if (!in) { problem = "cannot open manifest"; return false; }
+
+    std::string line;
+    std::vector<std::string> fields;
+    if (!std::getline(in, line)) { problem = "manifest is empty"; return false; }
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.size() >= 3 && (unsigned char)line[0] == 0xEF && (unsigned char)line[1] == 0xBB && (unsigned char)line[2] == 0xBF)
+        line.erase(0, 3);
+    if (!splitManifestTsv(line, fields)) { problem = "header is not valid TSV"; return false; }
+
+    const size_t headerCount = fields.size();
+    size_t rowCol = SIZE_MAX, pathCol = SIZE_MAX, sizeCol = SIZE_MAX, cvCol = SIZE_MAX, cpCol = SIZE_MAX;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        std::string name = lower(fields[i]);
+        size_t* found = nullptr;
+        if (name == "row_key") found = &rowCol;
+        else if (name == "target_relative_path") found = &pathCol;
+        else if (name == "size") found = &sizeCol;
+        else if (name == "virtual_bytes") found = &cvCol;
+        else if (name == "physical_bytes") found = &cpCol;
+        if (found) {
+            if (*found != SIZE_MAX) { problem = "duplicate header " + name; return false; }
+            *found = i;
+        }
+    }
+    if (rowCol == SIZE_MAX || pathCol == SIZE_MAX || sizeCol == SIZE_MAX) {
+        problem = "header needs row_key, target_relative_path and size"; return false;
+    }
+    if ((cvCol == SIZE_MAX) != (cpCol == SIZE_MAX)) {
+        problem = "virtual_bytes and physical_bytes must appear together"; return false;
+    }
+
+    std::unordered_set<std::string> rowKeys;
+    size_t lineNo = 1;
+    while (std::getline(in, line)) {
+        ++lineNo;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) { problem = "blank row at line " + std::to_string(lineNo); return false; }
+        if (line.size() > 32768 || !splitManifestTsv(line, fields)) {
+            problem = "invalid TSV at line " + std::to_string(lineNo); return false;
+        }
+        size_t need = std::max(rowCol, std::max(pathCol, sizeCol));
+        if (cvCol != SIZE_MAX) need = std::max(need, std::max(cvCol, cpCol));
+        if (fields.size() != headerCount || fields.size() <= need ||
+            fields[rowCol].find_first_not_of(" \t") == std::string::npos) {
+            problem = "missing field at line " + std::to_string(lineNo); return false;
+        }
+        std::string key = fields[pathCol];
+        if (!safeManifestPath(key)) {
+            problem = "unsafe or unsupported path at line " + std::to_string(lineNo); return false;
+        }
+        PackExpected item;
+        if (!parseManifestUint64(fields[sizeCol], item.size)) {
+            problem = "invalid size at line " + std::to_string(lineNo); return false;
+        }
+        if (cvCol != SIZE_MAX) {
+            if (!parseManifestUint64(fields[cvCol], item.cv, true) || !parseManifestUint64(fields[cpCol], item.cp, true)) {
+                problem = "invalid RSC cost at line " + std::to_string(lineNo); return false;
+            }
+            item.hasCost = true;
+        }
+        if (!expected.emplace(key, item).second) {
+            problem = "duplicate path " + key; return false;
+        }
+        rowKeys.insert(fields[rowCol]);
+        if (expected.size() > 65536) { problem = "manifest exceeds 65,536 files"; return false; }
+    }
+    if (expected.empty()) { problem = "manifest has no resources"; return false; }
+
+    std::unordered_set<std::string> seen;
+    for (const auto& cd : candidates) {
+        auto it = expected.find(cd.slot);
+        if (it == expected.end()) { problem = "unmanifested resource " + cd.slot; return false; }
+        WIN32_FILE_ATTRIBUTE_DATA fad;
+        if (!GetFileAttributesExA(cd.full.c_str(), GetFileExInfoStandard, &fad)) {
+            problem = "cannot stat " + cd.slot; return false;
+        }
+        uint64_t actual = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+        if (actual != it->second.size) { problem = "size mismatch for " + cd.slot; return false; }
+        if (!seen.insert(cd.slot).second) { problem = "duplicate resource " + cd.slot; return false; }
+    }
+    if (seen.size() != expected.size()) {
+        for (const auto& item : expected) if (!seen.count(item.first)) {
+            problem = "missing or quarantined resource " + item.first; return false;
+        }
+    }
+    groups = rowKeys.size();
+    return true;
+}
+
+static bool preflightManagedPack(const std::vector<Cand>& candidates)
+{
+    DWORD attr = GetFileAttributesA(g_packManifestPath);
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError();
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return true;
+        g_packManifestActive = true;
+        LOG_ERROR(LogCategory::Scan, "MANAGED PACK REFUSED: cannot inspect manifest (err %lu); no managed overrides will load this session", error);
+        return false;
+    }
+    g_packManifestActive = true;
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) || (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        LOG_ERROR(LogCategory::Scan, "MANAGED PACK REFUSED: manifest must be a regular file; no managed overrides will load this session");
+        return false;
+    }
+    size_t groups = 0; std::string problem;
+    if (!readPackManifest(g_packManifestPath, candidates, g_packExpected, groups, problem)) {
+        LOG_ERROR(LogCategory::Scan, "MANAGED PACK REFUSED: %s; no managed overrides will load this session", problem.c_str());
+        return false;
+    }
+    g_packManifestReady = true;
+    LOG_INFO(LogCategory::Scan, "Managed pack inventory complete: %zu file(s) in %zu group(s); live resource reload disabled",
+             g_packExpected.size(), groups);
+    return true;
+}
+
 static void walkDir(const std::string& base, const std::string& rel, std::vector<Cand>& out)
 {
     std::string pattern = base + rel + "\\*";
@@ -552,6 +743,28 @@ static void scanFinish()
 {
     ULONGLONG t0 = GetTickCount64();
     readCosts(g_cands);
+    if (g_packManifestActive && g_packManifestReady) {
+        std::string problem;
+        for (const auto& cd : g_cands) {
+            auto it = g_packExpected.find(cd.slot);
+            if (it == g_packExpected.end()) { problem = "inventory changed during preflight: " + cd.slot; break; }
+            WIN32_FILE_ATTRIBUTE_DATA fad;
+            if (!GetFileAttributesExA(cd.full.c_str(), GetFileExInfoStandard, &fad)) {
+                problem = "resource disappeared during preflight: " + cd.slot; break;
+            }
+            uint64_t actual = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            if (actual != it->second.size) { problem = "size changed during preflight: " + cd.slot; break; }
+            if (!cd.c.readable || !cd.c.rsc) { problem = "invalid RSC7 header: " + cd.slot; break; }
+            if (it->second.hasCost && (cd.c.cv != it->second.cv || cd.c.cp != it->second.cp)) {
+                problem = "RSC cost mismatch: " + cd.slot; break;
+            }
+        }
+        if (!problem.empty()) {
+            g_packManifestReady = false;
+            g_cands.clear();
+            LOG_ERROR(LogCategory::Scan, "MANAGED PACK REFUSED: %s; no managed overrides will load this session", problem.c_str());
+        }
+    }
     EnterCriticalSection(&g_cs);   // the watcher can be appending to g_ovs by now
     int n = 0;
     for (auto& cd : g_cands) {
@@ -1921,6 +2134,7 @@ static void Setup()
       g_off = (GetFileAttributesA(off.c_str()) != INVALID_FILE_ATTRIBUTES); }
     _snprintf_s(g_inflightPath,   MAX_PATH, _TRUNCATE, "%s_inflight.txt",   g_overrideDir);
     _snprintf_s(g_quarantinePath, MAX_PATH, _TRUNCATE, "%s_quarantine.txt", g_overrideDir);
+    _snprintf_s(g_packManifestPath, MAX_PATH, _TRUNCATE, "%s_gtaw_pack_manifest.tsv", g_overrideDir);
     InitializeCriticalSection(&g_logCs);
     g_logCsInit = true;
     InitializeCriticalSection(&g_cs);   // must exist before the hook can fire
@@ -2071,6 +2285,7 @@ static void backgroundStartup()
     readBudgetFile();
     decideBudget();   // DXGI only works out here, after DllMain has returned
     walkDir(std::string(g_overrideDir), "", g_cands);
+    if (!preflightManagedPack(g_cands)) g_cands.clear();
     LOG_INFO(LogCategory::Scan, "Discovered %zu candidate file(s); reading headers...", g_cands.size());
     scanFinish();
     loadPlacementFiles();
@@ -2114,9 +2329,15 @@ static DWORD WINAPI BeatLoop(LPVOID)
             // once streaming is live, start the live-reload watcher — before that there is
             // nothing a change could apply to anyway
             if (!g_watcherStarted && !g_off && g_idsReady) {
-                HANDLE w = CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
-                if (w) { g_watcherStarted = true; CloseHandle(w); }
-                else LOG_WARN(LogCategory::Live, "Live reload: watcher thread could not start (err %lu), retrying next tick", GetLastError());
+                if (g_packManifestActive) {
+                    g_watcherStarted = true;
+                    LOG_INFO(LogCategory::Live, "Managed pack is static: watcher and main-thread message hook not started; restart to apply file changes");
+                }
+                else {
+                    HANDLE w = CreateThread(nullptr, 0, WatchLoop, nullptr, 0, nullptr);
+                    if (w) { g_watcherStarted = true; CloseHandle(w); }
+                    else LOG_WARN(LogCategory::Live, "Live reload: watcher thread could not start (err %lu), retrying next tick", GetLastError());
+                }
             }
             // re-assert: DLC mounts and FiveM's loader re-point claimed slots after us; whoever
             // writes the handle last wins, so write ours back. Same mechanism Cfx's own override
