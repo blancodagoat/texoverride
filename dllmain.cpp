@@ -598,8 +598,8 @@ static bool readPackManifest(const char* path, const std::vector<Cand>& candidat
         if (line.size() > 32768 || !splitManifestTsv(line, fields)) {
             problem = "invalid TSV at line " + std::to_string(lineNo); return false;
         }
-        size_t need = std::max(rowCol, std::max(pathCol, sizeCol));
-        if (cvCol != SIZE_MAX) need = std::max(need, std::max(cvCol, cpCol));
+        size_t need = (std::max)(rowCol, (std::max)(pathCol, sizeCol));
+        if (cvCol != SIZE_MAX) need = (std::max)(need, (std::max)(cvCol, cpCol));
         if (fields.size() != headerCount || fields.size() <= need ||
             fields[rowCol].find_first_not_of(" \t") == std::string::npos) {
             problem = "missing field at line " + std::to_string(lineNo); return false;
