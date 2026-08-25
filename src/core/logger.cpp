@@ -1,6 +1,7 @@
 #include "core/logger.h"
 #include "core/state.h"
 #include <cstdio>
+#include <share.h>
 #include <cstdarg>
 #include <ctime>
 
@@ -49,8 +50,11 @@ void logMessage(LogLevel level, LogCategory cat, const char* fmt, ...)
     strftime(ts, sizeof ts, "%H:%M:%S", &tm);
 
     if (g_logCsInit) EnterCriticalSection(&g_logCs);
-    FILE* f = nullptr;
-    if (fopen_s(&f, g_logPath, "a") == 0 && f) {
+    // _SH_DENYNO, not fopen_s: fopen_s opens with sharing DENIED, so while anything else holds
+    // the log open (a tail, an editor, a Discord upload in progress) every open here fails and
+    // the line is dropped without a trace. Found 2026-08-25 when a tail -f silenced a whole session.
+    FILE* f = _fsopen(g_logPath, "a", _SH_DENYNO);
+    if (f) {
         fprintf(f, "[%s] [%s] %s %s\n", ts, levelToString(level), categoryToString(cat), buf);
         if (level >= LogLevel::Warn) fflush(f);
         fclose(f);
