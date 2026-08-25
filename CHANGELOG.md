@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.8.9 (2026-08-25)
 
+- The log could go silent for a whole session. It was opened in a mode that refuses to share the
+  file, so while any other program held `texoverride.log` open (a log viewer, an upload in
+  progress) every line the plugin tried to write was dropped, with nothing to show for it. It now
+  opens shared.
+- When a file is registered but its slot is not there yet, the log now says why (no such file type
+  in the game, or the name is unknown), instead of only "target not present yet".
 - Props can be replaced now. Any `.ydr` or `.yft` put straight into `tex_overrides` is taken and
   handed to the game under that exact name, so a phone, a notepad, a police laptop or a door model
   can be swapped the same way a weapon model can. Until now only `w_` names were taken, and a prop

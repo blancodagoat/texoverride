@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <cstring>
 #include <string>
+#include <set>
 
 // rage::strStreamingInfo packs three things into that second dword (Rockstar streamingdefs.h,
 // cross-checked against Cfx's ReleaseObject(idx, 0xF1)):
@@ -91,6 +92,23 @@ uint32_t targetStreamingId(const char* slot, int* why)
         void* module = g_getStreamingModuleFn((uint8_t*)manager + 0x1B8, extension.c_str());
         if (!module) return fail(SLOT_NO_MODULE);
         uint32_t id = findModuleSlotSafe(module, stem.c_str(), runningGameBuild());
+        // Slotted keys (folder/file) are also tried as "folder/stem" and "folder\stem": audio
+        // banks are addressed as pack/bank and nobody knows which spelling the module keys on.
+        // The log says which one hit, once per extension, so the answer lands in a user log.
+        if (id == 0xFFFFFFFF && file != slot) {
+            std::string folder(slot, (size_t)(file - slot - 1));
+            const char* seps[] = { "/", "\\" };
+            for (const char* sep : seps) {
+                std::string alt = folder + sep + stem;
+                id = findModuleSlotSafe(module, alt.c_str(), runningGameBuild());
+                if (id != 0xFFFFFFFF) {
+                    static std::set<std::string> said;
+                    if (said.insert(extension).second)
+                        LOG_INFO(LogCategory::Claim, "Slot lookup for .%s: the module keys on \"%s\" (folder%sname), not the bare name", extension.c_str(), alt.c_str(), sep);
+                    break;
+                }
+            }
+        }
         if (id == 0xFFFFFFFF) return fail(SLOT_NO_NAME);
         if (why) *why = SLOT_OK;
         return id;
@@ -159,7 +177,9 @@ int recoverOccupiedSlot(Ov& ov)
     if (!localRawHandle(ov.gfile ? ov.gfile : ov.file, &rawHandle)) return OCCUPIED_FAILED;
     ov.handle = rawHandle;
 
-    uint32_t target = targetStreamingId(ov.slot);
+    int why = SLOT_OK;
+    uint32_t target = targetStreamingId(ov.slot, &why);
+    noteSlotWhy(ov.slot, why);   // "no module for this type" vs "does not know that name" is the whole diagnosis
     if (!validStreamingId(target)) {
         ov.id = 0xFFFFFFFF;
         return OCCUPIED_WAITING;
