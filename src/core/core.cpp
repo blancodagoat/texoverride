@@ -22,6 +22,8 @@
 uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asName, bool b2)
 {
     InterlockedIncrement(&g_regTotal);
+    // lowered once for both blocks below; this hook runs for every file a server streams
+    const std::string keyLower = asName ? lower(asName) : std::string();
 
     if (asName)
     {
@@ -190,7 +192,6 @@ uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asNa
         //
         // Root files are not collections, so they get their own line instead of going through
         // collectionOf, which returns the whole filename for them.
-        std::string keyLower = lower(asName);
         bool rootFile = keyLower.find('/') == std::string::npos;
         std::string coll = rootFile ? keyLower : collectionOf(keyLower);
 
@@ -243,7 +244,7 @@ uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asNa
     // g_bySlot can gain entries at runtime now (live reload), so the lookup takes the lock.
     if (!g_off && asName)
     {
-        std::string key = lower(asName);
+        const std::string& key = keyLower;
         if (isAllowedKey(key))
         {
             const char* redirect = nullptr;
@@ -375,13 +376,24 @@ DWORD WINAPI BeatLoop(LPVOID)
                     for (uint32_t which : { ov.id, ov.altId }) {
                         if (which >= (uint32_t)g_mgr->numEntries) continue;
                         StrEntry& e = g_mgr->entries[which];
-                        if ((e.flags & 3) == 1) ++beatLoaded;
+                        bool loaded = (e.flags & 3) == 1;
+                        if (loaded) ++beatLoaded;
+                        // First time the game has this slot in memory: say whose file it read.
+                        // A slot can be held all session and still show the game's texture if
+                        // the load happened while the DLC mount owned the handle and refs then
+                        // pinned the object (body skin blends AddRef their source txds).
+                        if (loaded && !ov.loadedSeen) {
+                            ov.loadedSeen = 1;
+                            if (e.handle == ov.handle) LOG_DEBUG(LogCategory::Claim, "LOADED: %s from your file", ov.slot);
+                            else LOG_WARN(LogCategory::Claim, "LOADED: %s from the GAME file (handle %08x); your file shows only after the game drops and reloads it", ov.slot, e.handle);
+                        }
                         if (e.handle == ov.handle) { ++beatOurs; continue; }
                         ++beatTheirs;
                         if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
                         uint32_t old = e.handle;
                         e.handle = ov.handle;
-                        if (++g_reclaims <= 60) LOG_INFO(LogCategory::Claim, "RECLAIM: %s (id=%u, %08x -> %08x)", ov.slot, which, old, ov.handle);
+                        if (++g_reclaims <= 60) LOG_INFO(LogCategory::Claim, "RECLAIM: %s (id=%u, %08x -> %08x)%s", ov.slot, which, old, ov.handle,
+                                                          loaded ? " - already in memory from the game file, applies after reload" : "");
                     }
                 }
                 LeaveCriticalSection(&g_cs);

@@ -31,6 +31,7 @@ struct Ov {
     uint32_t id = 0xFFFFFFFF;     // global streaming index our claim landed on
     uint32_t altId = 0xFFFFFFFF;  // the index the STORE resolves this name to
     uint32_t handle = 0;          // the handle value that points at OUR file
+    uint8_t loadedSeen = 0;       // 1 once the first LOADED has been logged for this slot
 };
 
 struct Cost {

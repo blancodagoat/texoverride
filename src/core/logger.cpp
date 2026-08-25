@@ -50,14 +50,16 @@ void logMessage(LogLevel level, LogCategory cat, const char* fmt, ...)
     strftime(ts, sizeof ts, "%H:%M:%S", &tm);
 
     if (g_logCsInit) EnterCriticalSection(&g_logCs);
-    // _SH_DENYNO, not fopen_s: fopen_s opens with sharing DENIED, so while anything else holds
-    // the log open (a tail, an editor, a Discord upload in progress) every open here fails and
-    // the line is dropped without a trace. Found 2026-08-25 when a tail -f silenced a whole session.
-    FILE* f = _fsopen(g_logPath, "a", _SH_DENYNO);
+    // Opened ONCE and kept. It used to be fopen/fprintf/fclose per line: an NTFS open, an
+    // append and a close (which is where Defender scans the file) for every line, inside this
+    // lock, while the hook held g_cs and the game's main thread waited on it. Startup writes
+    // ~700 lines. _SH_DENYNO so a tail, an editor or a Discord upload can still read it.
+    // Setup rotates the previous log BEFORE the first line, so the lazy open never fights it.
+    static FILE* f = nullptr;
+    if (!f) f = _fsopen(g_logPath, "a", _SH_DENYNO);
     if (f) {
         fprintf(f, "[%s] [%s] %s %s\n", ts, levelToString(level), categoryToString(cat), buf);
-        if (level >= LogLevel::Warn) fflush(f);
-        fclose(f);
+        fflush(f);   // every line: a crash log with the last lines missing is worthless
     }
     if (g_logCsInit) LeaveCriticalSection(&g_logCs);
 }

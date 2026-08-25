@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- The log file is now opened once and kept open, instead of being opened, written and closed for
+  every single line. At connect the plugin writes several hundred lines while the game's own file
+  thread is inside our hook, and each open and close was a trip through NTFS and the antivirus
+  on-close scan. Every line is still flushed straight away, so a crash log is not missing its last
+  lines. One side effect: the log cannot be deleted while FiveM is running (it can still be read
+  and copied).
+- The file name a server streams is lowercased once per hook call instead of twice.
+- The log now says whose file the game actually read the first time each held slot lands in
+  memory. `LOADED ... from your file` is a debug line; `LOADED ... from the GAME file` is a
+  warning, and a RECLAIM on a slot that is already in memory says so. Holding a slot is only half
+  the story: if the game loaded the texture while a DLC mount owned the handle and then pinned
+  it, the swap never shows. Body skin (`mp_fm_skin_*`) is the case that prompted this, because
+  the skin blend keeps a reference on its source textures for the life of the ped.
+
 ## 0.8.9 (2026-08-25)
 
 - The log could go silent for a whole session. It was opened in a mode that refuses to share the
