@@ -614,6 +614,12 @@ What you can do:
 - Add an exclusion for your FiveM `plugins` folder, if you are comfortable doing that and you
   trust where you got the file.
 
+**If FiveM shows "Couldn't load texoverride.asi" and there is no `texoverride.log` next to the
+file**, an antivirus stopped the file from loading and did not tell you. McAfee does this. Nothing
+shows up in Windows Security, the file looks fine, and loading it from anywhere else works. Add
+`texoverride.asi` to McAfee's Real-Time Scanning exclusions, or remove McAfee (Windows Defender
+takes over on its own) and restart FiveM.
+
 What this project will not do is obfuscate, pack, or otherwise dress the file up to slip past
 scanners. That is what actual malware does, it makes detections worse rather than better, and it
 would destroy the one thing that makes a mod like this trustworthy: that you can read every line
