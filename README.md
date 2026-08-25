@@ -620,6 +620,19 @@ shows up in Windows Security, the file looks fine, and loading it from anywhere 
 `texoverride.asi` to McAfee's Real-Time Scanning exclusions, or remove McAfee (Windows Defender
 takes over on its own) and restart FiveM.
 
+Windows Security settings and the plugin, if you want to check yours:
+
+- Keep on: real-time protection, cloud-delivered protection, firewall, reputation-based
+  protection (PUA blocking and SmartScreen), core isolation. None of these stop the plugin. At
+  worst one flags a fresh download; allow it in Protection history.
+- Must stay off: Smart App Control. It blocks every unsigned file, this one included. Once it is
+  off it cannot be turned back on without reinstalling Windows.
+- Leave at defaults: Exploit protection program settings (an entry for FiveM with Code integrity
+  guard or Arbitrary code guard would block the plugin) and Controlled folder access (if it is on
+  and the log never appears, allow FiveM there).
+- Do not run a second antivirus next to Defender. McAfee, Norton, Avast, AVG and Kaspersky trials
+  switch Defender off and can veto the plugin loading with no notice, which is the case above.
+
 What this project will not do is obfuscate, pack, or otherwise dress the file up to slip past
 scanners. That is what actual malware does, it makes detections worse rather than better, and it
 would destroy the one thing that makes a mod like this trustworthy: that you can read every line
