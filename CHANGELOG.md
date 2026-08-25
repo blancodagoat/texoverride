@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.10 (2026-08-25)
 
 - The log file is now opened once and kept open, instead of being opened, written and closed for
   every single line. At connect the plugin writes several hundred lines while the game's own file
