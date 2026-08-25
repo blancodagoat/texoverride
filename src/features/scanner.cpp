@@ -26,7 +26,12 @@ void walkDir(const std::string& base, const std::string& rel, std::vector<Cand>&
         std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
         // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
         if (!isAllowedKey(slotStr)) {
-            LOG_WARN(LogCategory::Scan, "SKIP %s - folder contents must use GTA ped part naming (e.g. head_000_r.ydd, uppr_diff_001_a_uni.ytd)", slotStr.c_str());
+            // a loose-type file inside a folder is the common mistake (a prop pack copied in
+            // whole); say where it goes instead of quoting the ped naming rule at it
+            if (hasExt(ln, ".ydr") || hasExt(ln, ".yft") || hasExt(ln, ".ycd") || hasExt(ln, ".ymt"))
+                LOG_WARN(LogCategory::Scan, "SKIP %s - %s files go straight into tex_overrides, not in a folder", slotStr.c_str(), strrchr(ln.c_str(), '.'));
+            else
+                LOG_WARN(LogCategory::Scan, "SKIP %s - folder contents must use GTA ped part naming (e.g. head_000_r.ydd, uppr_diff_001_a_uni.ytd)", slotStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
@@ -89,9 +94,10 @@ void scanFinish()
         for (auto& kv : rootExtCounts) {
             const char* typeDesc = "Other";
             if (kv.first == "ytd") typeDesc = "Overlays (.ytd)";
-            else if (kv.first == "ydr") typeDesc = "Weapon models (.ydr)";
+            else if (kv.first == "ydr") typeDesc = "Weapon and prop models (.ydr)";
+            else if (kv.first == "yft") typeDesc = "Fragments (.yft)";
             else if (kv.first == "ycd") typeDesc = "Clip animations (.ycd)";
-            else if (kv.first == "ymt" || kv.first == "yft" || kv.first == "ydd") typeDesc = "Animal models/meta";
+            else if (kv.first == "ymt" || kv.first == "ydd") typeDesc = "Animal models/meta";
             LOG_INFO(LogCategory::Scan, "    %-38s %3d file(s)", typeDesc, kv.second);
         }
     }

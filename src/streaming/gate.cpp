@@ -155,14 +155,16 @@ bool isAllowedKey(const std::string& key)
     // through this very call, and the re-assert loop is the only thing on the client
     // that can take a slot back off one.
     if (hasExt(key, ".ycd")) return true;
-    // .ydr: a weapon drawable. Every GTA V weapon — base game and DLC — uses the w_
-    // prefix (w_pi_pistol, w_ar_assaultrifle, w_sg_pumpshotgun, etc.), and server-added
-    // weapons follow the same convention. That prefix is what separates weapon drawables
-    // from vehicle parts, props, building pieces and every other .ydr in the game.
-    if (hasExt(key, ".ydr")) return lower(key).rfind("w_", 0) == 0;
+    // .ydr / .yft: a drawable or a fragment. Weapons (w_*), world props (prop_*, p_*, v_*, and
+    // whatever a server calls its own) and vehicles all live here, and all of them stream by
+    // exact file name, so the same rule as a .ytd applies: any name, matched exactly. 0.8.8 took
+    // only w_* here; a pack of props landed in a folder and every file was refused (see the
+    // README's prop section). Nothing is cross-wired by a bare exact name, because the name IS
+    // the slot.
+    if (hasExt(key, ".ydr") || hasExt(key, ".yft")) return true;
     if (hasExt(key, ".ymt")) return !isVanillaAnimalYmt(key);
-    return lower(key).rfind("a_c_", 0) == 0
-        && (hasExt(key, ".ydd") || hasExt(key, ".yft"));
+    // .ydd at the root: only the animal models. A ped drawable belongs to a collection.
+    return lower(key).rfind("a_c_", 0) == 0 && hasExt(key, ".ydd");
 }
 
 // Types we walk past on purpose. Announcing beats a silent skip: a .meta is a file mods really do

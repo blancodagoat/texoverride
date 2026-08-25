@@ -195,24 +195,44 @@ uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asNa
         std::string coll = rootFile ? keyLower : collectionOf(keyLower);
 
         if (g_collSeen.insert(coll).second) {
-            if (rootFile) {
-                LOG_INFO(LogCategory::Collection, "Server file:       %-40s [%s]", coll.c_str(),
-                         isAllowedKey(keyLower) ? "overridable, put yours in tex_overrides/"
-                                                : "OTHER - never touched");
-            } else if (isPedCollection(coll)) {
-                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [overridable] -> tex_overrides/%s/",
-                         coll.c_str(), classifyCollection(coll), coll.c_str());
-            } else if (isBlockedCollection(coll)) {
-                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [OTHER - never touched]",
-                         coll.c_str(), classifyCollection(coll));
-            } else {
-                LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [depends on the file names inside] -> tex_overrides/%s/",
-                         coll.c_str(), classifyCollection(coll), coll.c_str());
+            if (!rootFile) {
+                // COLLECTIONS ARE NEVER CAPPED AND NEVER HIDDEN. There are only ever a handful (32
+                // on the log this split was measured from) and they are the whole discovery
+                // channel: a refused collection that is not logged reads exactly like one the
+                // server never streamed, and a user's log is the only way a naming family the gate
+                // does not know yet ever reaches us. That is how caninesd killed the folder
+                // whitelist in 0.8.5. Cheap, and load-bearing. Leave it alone.
+                if (isPedCollection(coll))
+                    LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [overridable] -> tex_overrides/%s/",
+                             coll.c_str(), classifyCollection(coll), coll.c_str());
+                else if (isBlockedCollection(coll))
+                    LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [OTHER - never touched]",
+                             coll.c_str(), classifyCollection(coll));
+                else
+                    LOG_INFO(LogCategory::Collection, "Server collection: %-40s %-20s [depends on the file names inside] -> tex_overrides/%s/",
+                             coll.c_str(), classifyCollection(coll), coll.c_str());
             }
-            // the old cap stopped logging at 500 and said nothing, so the tail read like a server
-            // that streams nothing at all. Say it out loud instead.
-            if (g_collSeen.size() == 500)
-                LOG_WARN(LogCategory::Collection, "500 distinct names logged, the rest will not be listed");
+            else if (isAllowedKey(keyLower)) {
+                // A loose file we could actually take over, so it answers "what can I override
+                // here". Worth listing, but a big server streams enough of them to be worth a cap,
+                // and THIS is the line the 500 cap was always meant for.
+                if (++g_collListed <= 500)
+                    LOG_INFO(LogCategory::Collection, "Server file:       %-40s [overridable, put yours in tex_overrides/]", coll.c_str());
+                else if (g_collListed == 501)
+                    LOG_WARN(LogCategory::Collection, "500 overridable server files listed; the rest are counted only");
+            }
+            else {
+                // Refused on TYPE or PREFIX, never on a name we might one day learn: a .ymap will
+                // never be a ped part, and a .ybn is collision. So unlike
+                // a refused COLLECTION there is nothing to discover here, and the volume is not
+                // hypothetical: 24758 of 26337 map lines on one real server (94%), peaking at 1624
+                // in a single second. Every one was an fopen/fprintf/fclose inside g_logCs while
+                // this thread also held g_cs and the game's main thread sat waiting on g_cs in
+                // drainOps. Count them, say so once, and put the names behind _debug.txt.
+                if (++g_collOther == 1)
+                    LOG_INFO(LogCategory::Collection, "Other server files (vehicle, prop and map data) are counted, not listed - create _debug.txt in tex_overrides to see them");
+                LOG_DEBUG(LogCategory::Collection, "Server file:       %-40s [OTHER - never touched]", coll.c_str());
+            }
         }
 
         LeaveCriticalSection(&g_cs);
@@ -387,8 +407,8 @@ DWORD WINAPI BeatLoop(LPVOID)
             LOG_INFO(LogCategory::Core, "Heartbeat (beat %d): %d held, %d contested, %ld reclaims (+%ld), %ld redirects (+%ld)",
                      beat, beatOurs, beatTheirs, g_reclaims, dReclaims, (long)g_redirects, dRedirects);
         } else if (beat % (g_minLogLevel == LogLevel::Debug ? 4 : 20) == 0 || beat == 1) {
-            LOG_INFO(LogCategory::Core, "Heartbeat (beat %d): %d held, %d contested, %d in memory, %ld redirects",
-                     beat, beatOurs, beatTheirs, beatLoaded, (long)g_redirects);
+            LOG_INFO(LogCategory::Core, "Heartbeat (beat %d): %d held, %d contested, %d in memory, %ld redirects, %ld other server files",
+                     beat, beatOurs, beatTheirs, beatLoaded, (long)g_redirects, g_collOther);
         }
     }
 }

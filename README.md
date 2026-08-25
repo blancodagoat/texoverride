@@ -94,7 +94,8 @@ Name the folder after the model and put the parts in it.
 What the plugin checks is not the folder name but the files inside. They have to be named the way
 GTA names body parts, like `head_000_r.ydd` or `uppr_diff_001_a_uni.ytd`. That is what stops a
 vehicle texture or a map file being loaded onto somebody, which is the reason the rule exists.
-Story characters are refused outright, as are vehicles, props and maps.
+Story characters are refused outright, as are maps. Props and weapons have their own place, see
+below.
 
 ## Replacing animals
 
@@ -275,8 +276,7 @@ tex_overrides/
   w_pi_pistol.ytd          <- weapon textures
 ```
 
-The file name has to start with `w_`. That is the naming convention every GTA V weapon follows,
-and it is what stops vehicle parts, props and other `.ydr` files from being loaded by mistake.
+Every GTA V weapon is named `w_` and then the weapon, so that is the name to use.
 
 Texture-only mods (`.ytd` only, no model change) have always worked. Nothing new is needed for
 those.
@@ -291,6 +291,29 @@ So try it, then read `plugins/texoverride.log`. A line saying `OVERRIDE-REG` or 
 your file name on it means the plugin claimed the slot. If your weapon is unchanged in game and
 neither line is there, it did not take, and that is worth opening an issue about with the log
 attached.
+
+## Replacing props
+
+A prop is any object that is not a character or a car: a phone, a notepad, a cardboard box, a
+police laptop, a sheet on a bed. Their model files are `.ydr` (a plain model) or `.yft` (a model
+with physics, like a door that swings), and their textures are `.ytd`. All three go straight into
+`tex_overrides`, no folder:
+
+```
+tex_overrides/
+  prop_cs_hand_radio.ydr   <- model
+  prop_cs_hand_radio.ytd   <- textures
+  prop_flag_sheriff.yft    <- a model with physics
+```
+
+If you copy a prop pack in as a folder, the log says `SKIP` and `files go straight into
+tex_overrides, not in a folder` for each one. Move the files up one level and restart.
+
+The file name is the whole rule. The plugin takes any `.ydr` or `.yft` at the root and gives it to
+the game under exactly that name, so it can only ever land on the object with that name. Props a
+server adds show up in the log as `Server file` lines and can be replaced, the same as a server
+weapon or animation. Props that came with GTA are in the same untested spot as vanilla weapons
+(read the section above); try it and read the log.
 
 ## Changing files while the game runs
 
@@ -446,7 +469,8 @@ work out a problem.
 | `PLACEMENT: ...` | A tattoo position change was applied |
 | `LIVE-ADD` / `LIVE-TAKEOVER` / `LIVE-UPDATE` | A file you changed while playing was picked up |
 | `Server collection: name kind [tag]` | A collection the server uses, what it is, and whether it is reachable |
-| `Server file: name [tag]` | A loose file the server streams, and whether it is reachable |
+| `Server file: name [overridable...]` | A loose file the server streams that you can replace |
+| `Other server files ... counted, not listed` | How many streamed files the plugin can never touch |
 | `Update available` / `Plugin is up to date` | Whether you have the newest version |
 | `Heartbeat (beat N) ...` | The plugin is still running |
 | `pattern NOT FOUND` | The game updated; the plugin needs an update |
@@ -457,6 +481,13 @@ The three tags on a `Server collection` line mean:
 - `depends on the file names inside`, the collection itself is fine, but each file still has to be
   named the way GTA names ped parts.
 - `OTHER - never touched`, a story or ambient character. The plugin refuses these on purpose.
+
+Collections are always listed, refused ones included, because that list is how new character names
+get found. Loose files are treated differently: the ones you can replace are listed, and everything
+else the server streams (car parts, props, map pieces, often tens of thousands of files) is only
+counted. Those names cannot ever be used, so listing them buried the useful lines and slowed the
+game down while it wrote them. Put a file called `_debug.txt` in `tex_overrides` if you want the
+full list back.
 
 ## How it works
 

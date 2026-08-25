@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Props can be replaced now. Any `.ydr` or `.yft` put straight into `tex_overrides` is taken and
+  handed to the game under that exact name, so a phone, a notepad, a police laptop or a door model
+  can be swapped the same way a weapon model can. Until now only `w_` names were taken, and a prop
+  pack copied in as a folder was refused file by file with a message about ped part naming. That
+  message now says where the files go instead.
+- `_OFF` now really is off. It used to still install the streaming hook and route every file
+  registration through the plugin; now the plugin returns before it creates a log, scans for
+  patterns, installs anything or starts a thread, so an `_OFF` launch is the same as a launch
+  with no plugin. It no longer rotates `texoverride.log` either. By chunguscodes (#14).
+- Live reload paces itself. Some game loops call the message pump several times per frame, which
+  could turn a big folder copy into hundreds of registrations in one burst. The pump now does one
+  batch every 10 ms, repeated writes to the same file fold into the work already queued, and the
+  queue is capped at 2,048 changes; past that the log says which changes need a restart. By
+  chunguscodes (#13).
+
 ## 0.8.8 (2026-08-23)
 
 - Works on servers that run an older game build. The plugin has to name every build it supports,
@@ -44,7 +61,17 @@
   crash-saver journal, listing your tex_overrides folder, reading the placement and budget files
   and finding the game's optional internals all moved to the background thread. The only thing
   that still has to happen first is installing the hook itself.
-- Thanks to chunguscodes, whose pull requests are behind the last two of those.
+- The log is much shorter and much faster. It used to list every single file a server streams,
+  including all the car parts, props and map pieces the plugin can never touch. On one real server
+  that was 24,758 useless lines out of 26,337, over 1,600 of them written in a single second, and
+  the log filled 3 MB in a couple of minutes. Worse, writing each line briefly blocked the thread
+  the game runs on, so a big server could stutter while the list was being written. Now the useful
+  lines stay: every collection, refused ones included, and every loose file you could actually
+  replace. The rest are counted and the total is reported. Put a file called `_debug.txt` in
+  `tex_overrides` to get the full list back.
+- The limit on how many lines the file list writes actually works now. It announced itself at 500
+  and then carried on listing everything anyway.
+- Thanks to chunguscodes, whose pull requests are behind two of those.
 
 ## 0.8.6 (2026-08-22)
 
