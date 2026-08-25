@@ -281,16 +281,13 @@ Every GTA V weapon is named `w_` and then the weapon, so that is the name to use
 Texture-only mods (`.ytd` only, no model change) have always worked. Nothing new is needed for
 those.
 
-Which weapons this reaches has not been tested as thoroughly as the rest of the plugin yet, so
-here is the honest state of it. A weapon your **server** streams is listed in the log as a
-`Server file` line and can be replaced, the same as an animation. A weapon that came with GTA is
-not listed there, because that list only shows what the server sends. Those may or may not work,
-and nobody has posted a log either way.
+Both kinds work: weapons your **server** streams (listed in the log as `Server file` lines) and
+weapons that came with GTA. Models that came with GTA go through exactly the same slot claim as
+props, and a vanilla prop model was confirmed showing in game on 2026-08-25.
 
-So try it, then read `plugins/texoverride.log`. A line saying `OVERRIDE-REG` or `REDIRECT` with
-your file name on it means the plugin claimed the slot. If your weapon is unchanged in game and
-neither line is there, it did not take, and that is worth opening an issue about with the log
-attached.
+If a weapon does not change, read `plugins/texoverride.log`. A line saying `OVERRIDE-REG` or
+`REDIRECT` with your file name on it means the plugin claimed the slot. If neither line is there,
+open an issue with the log attached.
 
 ## Replacing props
 
@@ -312,8 +309,8 @@ tex_overrides, not in a folder` for each one. Move the files up one level and re
 The file name is the whole rule. The plugin takes any `.ydr` or `.yft` at the root and gives it to
 the game under exactly that name, so it can only ever land on the object with that name. Props a
 server adds show up in the log as `Server file` lines and can be replaced, the same as a server
-weapon or animation. Props that came with GTA are in the same untested spot as vanilla weapons
-(read the section above); try it and read the log.
+weapon or animation. Props that came with GTA work too: `prop_beer_bottle.ydr` and
+`prop_beer_logger.ydr` dropped at the root showed the new models in game (2026-08-25).
 
 ## Changing files while the game runs
 

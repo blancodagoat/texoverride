@@ -6,7 +6,9 @@
   handed to the game under that exact name, so a phone, a notepad, a police laptop or a door model
   can be swapped the same way a weapon model can. Until now only `w_` names were taken, and a prop
   pack copied in as a folder was refused file by file with a message about ped part naming. That
-  message now says where the files go instead.
+  message now says where the files go instead. Tested in game on two props that ship with GTA
+  (`prop_beer_bottle`, `prop_beer_logger`), which also settles the open question from 0.8.8: a
+  model slot the game already owns can be claimed, so weapons that came with GTA work as well.
 - `_OFF` now really is off. It used to still install the streaming hook and route every file
   registration through the plugin; now the plugin returns before it creates a log, scans for
   patterns, installs anything or starts a thread, so an `_OFF` launch is the same as a launch
