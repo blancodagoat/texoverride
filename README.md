@@ -633,6 +633,19 @@ Windows Security settings and the plugin, if you want to check yours:
 - Do not run a second antivirus next to Defender. McAfee, Norton, Avast, AVG and Kaspersky trials
   switch Defender off and can veto the plugin loading with no notice, which is the case above.
 
+To find out what is blocking it when nothing admits to it, use Process Monitor:
+
+1. Download Procmon from Microsoft (search "Sysinternals Process Monitor") and run it as
+   administrator. Close FiveM first.
+2. In Procmon press Ctrl+L, add the filter `Path` `contains` `texoverride.asi`, click Add, OK.
+3. Launch FiveM and wait for the "Couldn't load" dialog. Go back to Procmon.
+4. Read the Result column. `SUCCESS` all the way down and still no log means a driver vetoed the
+   load; look at the Process Name column for anything that is not FiveM (an antivirus service
+   touching the file right before the failure is the answer). `ACCESS DENIED` names the blocker
+   directly. `NAME NOT FOUND` means FiveM is looking in a different plugins folder than the one
+   you put the file in.
+5. To keep the evidence: File > Save, PML format, and attach it to a GitHub issue.
+
 What this project will not do is obfuscate, pack, or otherwise dress the file up to slip past
 scanners. That is what actual malware does, it makes detections worse rather than better, and it
 would destroy the one thing that makes a mod like this trustworthy: that you can read every line
