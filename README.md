@@ -337,9 +337,14 @@ the file, delete `_quarantine.txt` from `tex_overrides` and it loads normally ag
 ## Update check
 
 At startup the plugin asks GitHub one question: what is the newest release number? If a newer
-version is out, a small popup tells you and asks if you want to download and install it automatically.
-Clicking Yes downloads the new `.asi` directly from the release and installs it so it takes effect on
-your next FiveM restart. Clicking No opens the releases page in your browser instead, and Cancel skips it.
+version is out, a small popup tells you and asks if you want it downloaded and installed for you.
+Yes downloads the new `.asi` from the GitHub release, checks that its SHA-256 matches the one
+printed in the release notes, and puts it in place. It takes effect on your next FiveM restart. No
+opens the releases page in your browser instead, and Cancel skips it. If a download does not match
+the hash, nothing is installed and the log says so.
+
+The version you had stays beside the new one as `texoverride.asi.old`. If the new version gives
+you trouble, delete `texoverride.asi` and rename the `.old` file back to `texoverride.asi`.
 
 To make updates install automatically without asking, create an empty file named
 `_AUTO_UPDATE` in `tex_overrides`.

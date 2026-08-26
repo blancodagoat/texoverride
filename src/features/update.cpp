@@ -237,7 +237,36 @@ static bool verifyPeFile(const std::string& path)
     return true;
 }
 
-static bool installUpdate(const std::string& downloadUrl, const std::string& latest)
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+
+// SHA-256 of a file, lowercase hex. CI prints the hash of every release asset in the release
+// notes, and the notes come back in the same API answer as the tag, so the check costs nothing.
+static std::string sha256File(const std::string& path)
+{
+    std::string hex;
+    HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return hex;
+    BCRYPT_ALG_HANDLE alg = nullptr; BCRYPT_HASH_HANDLE hash = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0 &&
+        BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) == 0) {
+        char buf[8192]; DWORD got = 0; bool ok = true;
+        while (ReadFile(h, buf, sizeof buf, &got, nullptr) && got > 0)
+            if (BCryptHashData(hash, (PUCHAR)buf, got, 0) != 0) { ok = false; break; }
+        UCHAR out[32];
+        if (ok && BCryptFinishHash(hash, out, sizeof out, 0) == 0) {
+            char tmp[65];
+            for (int i = 0; i < 32; ++i) _snprintf_s(tmp + i * 2, 3, _TRUNCATE, "%02x", out[i]);
+            hex = tmp;
+        }
+    }
+    if (hash) BCryptDestroyHash(hash);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    CloseHandle(h);
+    return hex;
+}
+
+static bool installUpdate(const std::string& downloadUrl, const std::string& latest, const std::string& expectHash)
 {
     char selfPath[MAX_PATH];
     if (!GetModuleFileNameA(g_self, selfPath, MAX_PATH)) {
@@ -257,6 +286,13 @@ static bool installUpdate(const std::string& downloadUrl, const std::string& lat
 
     if (!verifyPeFile(dlPath)) {
         LOG_ERROR(LogCategory::Update, "Downloaded update %s failed PE binary validation; aborting install", latest.c_str());
+        DeleteFileA(dlPath.c_str());
+        return false;
+    }
+    std::string got = sha256File(dlPath);
+    if (got != expectHash) {
+        LOG_ERROR(LogCategory::Update, "Downloaded update %s does not match the SHA-256 in the release notes (got %s, expected %s); not installed",
+                  latest.c_str(), got.c_str(), expectHash.c_str());
         DeleteFileA(dlPath.c_str());
         return false;
     }
@@ -281,7 +317,7 @@ static bool installUpdate(const std::string& downloadUrl, const std::string& lat
         return false;
     }
 
-    LOG_INFO(LogCategory::Update, "Update %s installed successfully; will take effect on next FiveM restart", latest.c_str());
+    LOG_INFO(LogCategory::Update, "Update %s installed; takes effect on next FiveM restart. The old version is kept beside it as texoverride.asi.old", latest.c_str());
     return true;
 }
 
@@ -338,8 +374,25 @@ DWORD WINAPI UpdateCheck(LPVOID)
         downloadUrl = "https://github.com/blancodagoat/texoverride/releases/download/" + latest + "/texoverride.asi";
     }
 
+    // the release notes carry "<64 hex> *texoverride.asi" from CI; without it nothing is installed
+    std::string expectHash;
+    { size_t m = body.find(" *texoverride.asi");   // the notes also say **texoverride.asi** in prose
+      if (m != std::string::npos && m >= 64) {
+          std::string hx = body.substr(m - 64, 64);
+          if (hx.find_first_not_of("0123456789abcdef") == std::string::npos) expectHash = hx;
+      } }
+
     if (verCmp(lv, TEXOVERRIDE_VERSION) > 0) {
         LOG_INFO(LogCategory::Update, "Update available: %s (current: " TEXOVERRIDE_VERSION ")", latest.c_str());
+        if (expectHash.empty()) {
+            LOG_WARN(LogCategory::Update, "Release notes carry no SHA-256 for texoverride.asi; auto-install skipped, opening the release page instead");
+            char msg[256];
+            _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                "A newer texoverride is out: %s (you have " TEXOVERRIDE_VERSION ").\n\nOpen the download page now?", latest.c_str());
+            if (MessageBoxA(nullptr, msg, "texoverride update", MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST) == IDYES)
+                ShellExecuteA(nullptr, "open", "https://github.com/blancodagoat/texoverride/releases", nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
 
         bool autoUpdate = (GetFileAttributesA((std::string(g_overrideDir) + "_AUTO_UPDATE").c_str()) != INVALID_FILE_ATTRIBUTES);
         bool shouldInstall = autoUpdate;
@@ -370,7 +423,7 @@ DWORD WINAPI UpdateCheck(LPVOID)
         }
 
         if (shouldInstall) {
-            if (installUpdate(downloadUrl, latest)) {
+            if (installUpdate(downloadUrl, latest, expectHash)) {
                 if (!autoUpdate) {
                     char doneMsg[256];
                     _snprintf_s(doneMsg, sizeof doneMsg, _TRUNCATE,
