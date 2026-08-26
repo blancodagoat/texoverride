@@ -2,6 +2,11 @@
 
 ## 0.8.10 (2026-08-25)
 
+- In-place auto-updater. When a newer version is released, the update popup now offers to download
+  and install the new `.asi` directly from GitHub instead of making you open a browser and copy files
+  by hand. It validates the downloaded binary and puts it in place so the new version loads the next
+  time FiveM starts. You can also create an empty `_AUTO_UPDATE` file in `tex_overrides` to install
+  updates automatically.
 - The log file is now opened once and kept open, instead of being opened, written and closed for
   every single line. At connect the plugin writes several hundred lines while the game's own file
   thread is inside our hook, and each open and close was a trip through NTFS and the antivirus

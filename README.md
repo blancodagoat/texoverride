@@ -337,12 +337,17 @@ the file, delete `_quarantine.txt` from `tex_overrides` and it loads normally ag
 ## Update check
 
 At startup the plugin asks GitHub one question: what is the newest release number? If a newer
-version is out, a small popup tells you and asks if you want the download page opened. Click
-Yes and it opens in your browser. That is the plugin's
-only network use. It sends nothing about you, your game or your files, and if you are offline it
-quietly does nothing.
+version is out, a small popup tells you and asks if you want to download and install it automatically.
+Clicking Yes downloads the new `.asi` directly from the release and installs it so it takes effect on
+your next FiveM restart. Clicking No opens the releases page in your browser instead, and Cancel skips it.
 
-To turn the check off, create an empty file named `_NO_UPDATE_CHECK` inside `tex_overrides`.
+To make updates install automatically without asking, create an empty file named
+`_AUTO_UPDATE` in `tex_overrides`.
+
+To turn the check off completely, create an empty file named `_NO_UPDATE_CHECK` inside `tex_overrides`.
+
+That is the plugin's only network use. It sends nothing about you, your game or your files, and if you are
+offline it quietly does nothing.
 
 One honest limit: when FiveM moves to a new game build, old plugin versions stop loading at all
 (see [The build stamp](#the-build-stamp)). A plugin that does not load cannot show a popup, so
