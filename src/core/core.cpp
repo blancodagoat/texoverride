@@ -438,6 +438,12 @@ void Setup()
     std::string plug = (slash==std::string::npos) ? dir : dir.substr(0, slash);
     _snprintf_s(g_logPath, MAX_PATH, _TRUNCATE, "%s\\texoverride.log", plug.c_str());
     _snprintf_s(g_overrideDir, MAX_PATH, _TRUNCATE, "%s\\tex_overrides\\", plug.c_str());
+    {
+        std::string oldAsi = std::string(self) + ".old";
+        DeleteFileA(oldAsi.c_str());
+        std::string dlAsi = std::string(self) + ".download";
+        DeleteFileA(dlAsi.c_str());
+    }
     { std::string off = std::string(g_overrideDir) + "_OFF";
       g_off = (GetFileAttributesA(off.c_str()) != INVALID_FILE_ATTRIBUTES); }
     // _OFF is the diagnostic control. Stop before logs, events, scans, hooks or worker threads
