@@ -307,7 +307,7 @@ void backgroundStartup()
     crashSaverStartup();
     g_crashSaverRan = true;
     locateRuntimePatterns();
-    writeDefaultSettings();   // first run: leave the user a file that explains itself
+    migrateSettings();   // first run writes the file; a marker file is absorbed and deleted
     readBudgetFile();
     decideBudget();   // DXGI only works out here, after DllMain has returned
     walkDir(std::string(g_overrideDir), "", g_cands);

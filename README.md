@@ -476,9 +476,10 @@ notes and the plugin skips them.
 The file is only ever created, never rewritten, so your changes and any notes you add to it
 survive every update. Delete it and you get a fresh one with everything off.
 
-If you used the older marker files (`_off`, `_debug`, `_budget.txt` and so on), they still work,
-with or without `.txt` on the end. A marker file turns its option on, and `_settings.txt` cannot
-switch it back off, so delete the marker file when you want to go back to the settings file.
+If you used the older marker files (`_off`, `_debug`, `_budget.txt` and so on), you do not have
+to do anything. The first time the plugin runs it copies each one into `_settings.txt`, deletes
+it, and writes a line in the log saying what it moved. After that the settings file is the only
+one there.
 
 Two other files turn up in that folder on their own. The plugin writes those. Leave them alone,
 apart from deleting `_quarantine.txt` when you want a quarantined file tried again.

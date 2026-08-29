@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.13 (2026-08-29)
+
+- The old marker files migrate themselves and then go away. 0.8.12 left two ways to set every
+  option, the settings file and the `_off` / `_debug` / `_verbose` / `_budget` / `_auto_update` /
+  `_no_update_check` files, which is not standardising anything. Now the first launch that finds
+  one copies its value into `_settings.txt`, deletes it, and says in the log what it moved. Your
+  settings carry over on that same launch, so nothing changes behaviour, and from then on the
+  folder holds one settings file instead of a scattering of empty ones. Notes you added to the
+  file survive, and a setting whose line you deleted is put back rather than lost.
+
 ## 0.8.12 (2026-08-29)
 
 - One settings file instead of a folder of oddly named marker files (issue #20 by chocomintw).
