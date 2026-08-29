@@ -105,9 +105,11 @@ folder while you play and reacts on its own when something in it changes.
 
 - Save an edited `overlays.xml` and the tattoo moves on your ped within a second or two. This
   makes tuning easy: nudge a number, save, look, repeat.
-- Overwrite a `.ytd` or `.ydd` the plugin already uses and the new picture shows the next time
-  the game reloads that item. Take the clothing or tattoo off and put it back on to force that.
-  This is the one you want while you are working on a texture, and it always works.
+- Overwrite a `.ytd` or `.ydd` the plugin already uses and the file is read again straight away.
+  Whether you SEE it without restarting depends on the game, not on the plugin. If the game still
+  has the old version loaded in memory, it keeps drawing that, and taking the item off and putting
+  it back on does not always force a fresh read. When that happens, restart FiveM. Editing a file
+  the game has not loaded yet is the case that works reliably.
 - Drop in a file with a name nothing else uses and it is picked up right away.
 - Do not want to wait? Press **F11** in game and the folder is read again straight away. It only
   works while the game window is focused, and it always writes a line in the log, even when
