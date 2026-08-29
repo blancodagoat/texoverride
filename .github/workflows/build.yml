@@ -97,3 +97,35 @@ jobs:
           } >> notes.md
           gh release create "$GITHUB_REF_NAME" texoverride.zip texoverride.asi --title "$GITHUB_REF_NAME" --notes-file notes.md \
             || gh release upload "$GITHUB_REF_NAME" texoverride.zip texoverride.asi --clobber
+      # Tell BlancoBot a new version is out. blancodagoat.dev already has the whole pipeline:
+      # POST a `tool_announce` job, the API pushes it onto Redis, and the gateway bot posts the
+      # embed in the announce channel as itself rather than as a raw webhook. So all this has to
+      # hand over is the changelog. A fork has no ANNOUNCE_TOKEN and skips, and a failed
+      # announcement is a warning rather than a failed build, because by the time this runs the
+      # release itself is already published.
+      - name: Announce on Discord
+        if: startsWith(github.ref, 'refs/tags/')
+        continue-on-error: true
+        shell: bash
+        env:
+          ANNOUNCE_TOKEN: ${{ secrets.ANNOUNCE_TOKEN }}
+        run: |
+          if [ -z "$ANNOUNCE_TOKEN" ]; then
+            echo "No ANNOUNCE_TOKEN secret; skipping the announcement."
+            exit 0
+          fi
+          # the changelog section on its own, minus its heading: notes.md by now also carries the
+          # install blurb and the hashes, and neither of those belongs in a Discord embed
+          body=$(awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +2)
+          url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME"
+          # Discord caps a description at 4096. Cut early and link out, rather than letting the
+          # bot truncate somebody mid-sentence.
+          if [ ${#body} -gt 3800 ]; then
+            body="${body:0:3800}
+
+          [Read the full changelog]($url)"
+          fi
+          jq -n --arg t "texoverride $GITHUB_REF_NAME" --arg d "$body" --arg u "$url" '{type:"tool_announce",payload:{title:$t,description:$d,url:$u,color:15575105,footer:"FiveM client-side clothing, weapon and animation overrides"}}' > announce.json
+          code=$(curl -sS -o resp.txt -w '%{http_code}' -X POST https://blancodagoat.dev/api/enqueue-discord-job -H "Authorization: Bearer $ANNOUNCE_TOKEN" -H 'Content-Type: application/json' --data @announce.json)
+          echo "enqueue-discord-job: HTTP $code $(cat resp.txt)"
+          test "$code" = "200"
