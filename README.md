@@ -8,11 +8,15 @@ Why this exists: FiveM's built-in ways of loading client mods cannot replace cha
 textures. This plugin does it the same way servers do when they add their own clothes. It just
 does it on your computer.
 
-**New here?** [Install](#install), then [what you can replace](#what-you-can-replace).
+**Start here:** [Install](#install) &middot; [What you can replace](#what-you-can-replace) &middot; [Settings](#settings) &middot; [Expect bugs](#expect-bugs)
 
-**Not working?** [It will not load](#it-says-couldnt-load-texoverrideasi) &middot; [textures gone or stuck blurry](#textures-gone-everything-stuck-on-low-detail) &middot; [your antivirus flagged it](#why-your-antivirus-may-call-it-a-trojan) &middot; [reading the log](#reading-the-log)
+**Something is wrong:** [It will not load](#it-says-couldnt-load-texoverrideasi) &middot; [Textures gone or stuck blurry](#textures-gone-everything-stuck-on-low-detail) &middot; [Your antivirus flagged it](#why-your-antivirus-may-call-it-a-trojan) &middot; [Reading the log](#reading-the-log)
 
-**Full guides:** [replacing files, step by step](docs/replacing-files.md) &middot; [how it works](docs/how-it-works.md) &middot; [building it yourself](docs/build.md)
+**While you play:** [Changing files as the game runs](#changing-files-while-the-game-runs) &middot; [Update check](#update-check) &middot; [Turning it off](#turning-it-off)
+
+**About:** [How it works](#how-it-works) &middot; [Ban risk](#ban-risk-stated-plainly) &middot; [Limitations](#limitations) &middot; [Build](#build) &middot; [Credits](#credits) &middot; [Files](#files)
+
+**Longer guides, in [docs/](docs/):** [replacing files, step by step](docs/replacing-files.md) &middot; [reading the log](docs/reading-the-log.md) &middot; [textures and the memory budget](docs/textures-and-budget.md) &middot; [how it works](docs/how-it-works.md) &middot; [antivirus](docs/antivirus.md) &middot; [building it yourself](docs/build.md)
 
 ## Expect bugs
 
