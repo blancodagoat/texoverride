@@ -291,6 +291,13 @@ build yourself is byte for byte the file CI publishes.
 
 Written by blancodagoat.
 
+chocomintw contributes features, not only fixes. Replacing weapon models started as their
+pull request in 0.8.8, and so did the log levels that turned the log into something you can
+read instead of a wall of text. They also split the plugin out of one long file into the
+`src/` tree it has now, and wrote the updater that offers you a new version and installs it
+for you. Their issue #20 is why six scattered marker files became one settings file in
+0.8.13.
+
 chunguscodes forked the plugin and sends fixes as small, separate pull requests. Four of them
 shipped in 0.8.6: the plugin now stops when its hook fails to install instead of carrying on and
 crashing on the first file it touches, it no longer leaks thread handles, copying a large folder
