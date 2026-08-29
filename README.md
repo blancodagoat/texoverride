@@ -312,6 +312,29 @@ server adds show up in the log as `Server file` lines and can be replaced, the s
 weapon or animation. Props that came with GTA work too: `prop_beer_bottle.ydr` and
 `prop_beer_logger.ydr` dropped at the root showed the new models in game (2026-08-25).
 
+## Replacing vehicles
+
+A vehicle mod that REPLACES a car or bike the game already has works the same way as a prop. Each
+vehicle is three or four files, all named after the vehicle, and all of them go straight into
+`tex_overrides`, no folder:
+
+```
+tex_overrides/
+  bagger.yft        <- the model
+  bagger_hi.yft     <- the close-up model
+  bagger.ytd        <- the paint and parts
+  bagger+hi.ytd     <- close-up textures (not every mod has one)
+```
+
+Most vehicle mods come as an OpenIV package (a `.rpf` for the `mods` folder). Open it with
+OpenIV, walk down to `dlc.rpf`, `x64`, `vehicles.rpf`, and drag the files out. The `data`
+folder next to it (`handling.meta`, `carcols.meta` and friends) is not something the plugin can
+use, so leave it. The model and textures are what you see; that is what gets replaced.
+
+What does not work: a mod that ADDS a new vehicle with its own name. Adding a vehicle needs the
+game to read `vehicles.meta` and `handling.meta`, which the plugin cannot do. For those, keep
+using the `mods` folder package the mod came as.
+
 ## Changing files while the game runs
 
 You do not have to restart FiveM after every change. The plugin watches the `tex_overrides`
@@ -347,9 +370,10 @@ The version you had stays beside the new one as `texoverride.asi.old`. If the ne
 you trouble, delete `texoverride.asi` and rename the `.old` file back to `texoverride.asi`.
 
 To make updates install automatically without asking, create an empty file named
-`_AUTO_UPDATE` in `tex_overrides`.
+`_auto_update.txt` in `tex_overrides`.
 
-To turn the check off completely, create an empty file named `_NO_UPDATE_CHECK` inside `tex_overrides`.
+To turn the check off completely, create an empty file named `_no_update_check.txt` inside
+`tex_overrides`.
 
 That is the plugin's only network use. It sends nothing about you, your game or your files, and if you are
 offline it quietly does nothing.
@@ -421,10 +445,35 @@ GTA itself, and it cannot make a pack fit that is simply too big. Shrinking the 
 
 ## Turning it off
 
-Create an empty file named `_OFF` (no file extension) inside `tex_overrides` and restart FiveM.
-The plugin stays installed but returns before it creates logs, events, hooks or worker threads. It
-does not rotate `texoverride.log` or run the update check. That makes `_OFF` a clean A/B control:
-the ASI still passes FiveM's loader check, but none of texoverride's runtime machinery starts.
+Create an empty file named `_off.txt` inside `tex_overrides` and restart FiveM. The plugin stays
+installed but returns before it creates logs, events, hooks or worker threads. It does not rotate
+`texoverride.log` or run the update check. That makes `_off.txt` a clean A/B control: the ASI still
+passes FiveM's loader check, but none of texoverride's runtime machinery starts.
+
+## Settings files
+
+Everything that changes how the plugin behaves is an empty file you drop into `tex_overrides`,
+except `_budget.txt`, which holds a number. They all live in that one folder.
+
+| File | What it does |
+|------|--------------|
+| `_off.txt` | Plugin stays installed but does nothing |
+| `_debug.txt` | Adds `DEBUG` detail to the log |
+| `_budget.txt` | Sets the texture budget in GB yourself |
+| `_auto_update.txt` | Installs updates without asking |
+| `_no_update_check.txt` | Never checks for updates |
+
+The `.txt` is optional on all of them. `_off` works exactly the same as `_off.txt`, so it does not
+matter whether Windows is hiding file extensions when you make one. Capital letters do not matter
+either. Restart FiveM after adding or removing any of these.
+
+Two more files show up in that folder on their own. The plugin writes those, so leave them alone
+apart from deleting `_quarantine.txt` when you want a quarantined file to be tried again.
+
+| File | What it is |
+|------|-----------|
+| `_quarantine.txt` | Files refused after a crash; delete it to try them again |
+| `_inflight.txt` | Scratch file used while registering; disappears on a clean exit |
 
 ## Reading the log
 

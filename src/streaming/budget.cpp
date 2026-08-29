@@ -1,6 +1,7 @@
 #include "streaming/budget.h"
 #include "core/state.h"
 #include "core/logger.h"
+#include "core/utils.h"
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <cstdio>
@@ -181,9 +182,10 @@ void costReport()
 // backgroundStartup), and the placement parse is not needed until the first beat.
 void readBudgetFile()
 {
-    char bp[MAX_PATH]; _snprintf_s(bp, _TRUNCATE, "%s_budget.txt", g_overrideDir);
+    std::string bp = ctlPath("_budget");
+    if (bp.empty()) return;
     FILE* bf = nullptr;
-    if (!fopen_s(&bf, bp, "rb") && bf) {
+    if (!fopen_s(&bf, bp.c_str(), "rb") && bf) {
         char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
         double gb = atof(buf);
         if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;

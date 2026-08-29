@@ -53,3 +53,19 @@ bool hasExt(const std::string& k, const char* e)
 {
     return k.size() > 4 && k.compare(k.size() - 4, 4, e) == 0;
 }
+
+// Control files (_off, _debug, _budget ...). One rule for all of them: the bare name works and
+// so does the .txt form. Windows Explorer hides known extensions, so "create an empty file named
+// _OFF, no extension" reliably produces _OFF.txt for some people, and "create _debug.txt"
+// reliably produces _debug.txt.txt for others. Accepting both spellings makes either mistake a
+// non-event, and costs nothing next to renaming files under every existing install. Casing needs
+// no code: Win32 paths are case-insensitive, so _OFF.txt already IS _off.txt.
+// Returns the path that exists, or an empty string when neither does.
+std::string ctlPath(const char* name)
+{
+    std::string p = std::string(g_overrideDir) + name;
+    if (GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    p += ".txt";
+    if (GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    return std::string();
+}

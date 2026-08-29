@@ -440,9 +440,8 @@ void Setup()
     _snprintf_s(g_overrideDir, MAX_PATH, _TRUNCATE, "%s\\tex_overrides\\", plug.c_str());
     // a download the updater never finished; texoverride.asi.old is kept on purpose (rollback)
     DeleteFileA((std::string(self) + ".download").c_str());
-    { std::string off = std::string(g_overrideDir) + "_OFF";
-      g_off = (GetFileAttributesA(off.c_str()) != INVALID_FILE_ATTRIBUTES); }
-    // _OFF is the diagnostic control. Stop before logs, events, scans, hooks or worker threads
+    g_off = !ctlPath("_off").empty();
+    // _off is the diagnostic control. Stop before logs, events, scans, hooks or worker threads
     // so it behaves like an installed but unloaded plugin rather than a bypass inside the hook.
     if (g_off) return;
     _snprintf_s(g_inflightPath,   MAX_PATH, _TRUNCATE, "%s_inflight.txt",   g_overrideDir);
@@ -452,14 +451,8 @@ void Setup()
     InitializeCriticalSection(&g_cs);   // must exist before the hook can fire
 
     // check for verbose / debug logging triggers
-    {
-        std::string verb = std::string(g_overrideDir) + "_verbose.txt";
-        std::string dbg  = std::string(g_overrideDir) + "_debug.txt";
-        if (GetFileAttributesA(verb.c_str()) != INVALID_FILE_ATTRIBUTES ||
-            GetFileAttributesA(dbg.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            g_minLogLevel = LogLevel::Debug;
-        }
-    }
+    if (!ctlPath("_verbose").empty() || !ctlPath("_debug").empty())
+        g_minLogLevel = LogLevel::Debug;
 
     // fresh log every launch, but keep one previous generation: after a crash the next launch
     // used to destroy the exact log that showed what the crashed session was doing

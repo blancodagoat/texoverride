@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.12 (2026-08-29)
+
+- Settings files all follow one rule now (issue #20 by chocomintw). `_off`, `_debug`, `_verbose`,
+  `_budget`, `_auto_update` and `_no_update_check` are each accepted with or without a `.txt` on
+  the end, so it no longer matters whether Windows is hiding file extensions when you create one.
+  Nothing has to be renamed: every file that worked before still works. The docs name the `.txt`
+  form for all of them, and the README has a table listing what each one does. Capital letters
+  never mattered and still do not.
+
+- A file with no `RSC7` header is refused instead of loaded. Those are raw dumps rather than real
+  game files, usually a texture renamed to `.ytd` or something pulled out with the wrong export
+  option, and the game dies in its own loader with "Invalid fixup, address is neither virtual nor
+  physical" the moment it streams one in. The log now names the file and says to export it with
+  OpenIV. `.ymt` is exempt, since a metadata file is not always an RSC7 resource.
+
+- README: how to install a vehicle mod that replaces a car or bike the game already has. The
+  model and texture files go straight into `tex_overrides` like any other prop. Adding a brand new
+  vehicle still needs the `mods` folder package it came with, because that needs `vehicles.meta`
+  and `handling.meta`, which the plugin cannot read.
+
 ## 0.8.11 (2026-08-26)
 
 - The update popup can now download and install the new version for you (PR #18 by chocomintw).

@@ -1,5 +1,6 @@
 #include "streaming/rsc.h"
 #include "core/logger.h"
+#include "core/utils.h"
 #include <windows.h>
 #include <cstdio>
 
@@ -54,6 +55,13 @@ bool cannotLoad(const char* key, const Cost& c, bool quiet)
 {
     if (!c.readable) {
         if (!quiet) LOG_WARN(LogCategory::Scan, "UNREADABLE %s - cannot open it; not loaded this launch", key);
+        return true;
+    }
+    // A .ytd/.ydd/.yft/.ydr/.ycd the game can read starts with 'RSC7'. Without it the file is a
+    // raw export (CodeWalker's ExtractFile, a renamed dds) and the game dies in its own loader with
+    // "Invalid fixup, address is neither virtual nor physical" the moment it streams it in.
+    if (!c.rsc && !hasExt(key, ".ymt")) {
+        if (!quiet) LOG_WARN(LogCategory::Scan, "NOT A GAME FILE %s - no RSC7 header (export it with OpenIV, not a raw dump); not loaded", key);
         return true;
     }
     uint64_t worst = (c.cv > c.cp) ? c.cv : c.cp;

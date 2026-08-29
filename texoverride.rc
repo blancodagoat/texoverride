@@ -28,8 +28,8 @@ FX_ASI_BUILD 3788 BEGIN "\0" END
 // nothing to look at. Keep FILEVERSION/PRODUCTVERSION in step with TEXOVERRIDE_VERSION on bumps.
 // Literal numbers rather than the winver.h names so the .rc never depends on an include path.
 1 VERSIONINFO
-FILEVERSION    0,8,11,0
-PRODUCTVERSION 0,8,11,0
+FILEVERSION    0,8,12,0
+PRODUCTVERSION 0,8,12,0
 FILEFLAGSMASK  0x3fL
 FILEFLAGS      0x0L
 FILEOS         0x40004L
@@ -42,12 +42,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "blancodagoat"
             VALUE "FileDescription",  "texoverride - draws your own .ydd and .ytd files on your ped in FiveM"
-            VALUE "FileVersion",      "0.8.11.0"
+            VALUE "FileVersion",      "0.8.12.0"
             VALUE "InternalName",     "texoverride"
             VALUE "LegalCopyright",   "Copyright (c) 2026 blancodagoat. MIT licensed."
             VALUE "OriginalFilename", "texoverride.asi"
             VALUE "ProductName",      "texoverride"
-            VALUE "ProductVersion",   "0.8.11.0"
+            VALUE "ProductVersion",   "0.8.12.0"
             VALUE "Comments",         "Source and releases: https://github.com/blancodagoat/texoverride"
         END
     END
