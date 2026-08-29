@@ -3,6 +3,7 @@
 #include "core/logger.h"
 #include "core/utils.h"
 #include "core/settings.h"
+#include "core/cfx.h"
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <cstdio>
@@ -145,6 +146,75 @@ void budgetBeat()
     __except (EXCEPTION_EXECUTE_HANDLER) {
         InterlockedExchange(&g_budgetFault, 1);
         LOG_ERROR(LogCategory::Audit, "Texture budget: Fault writing budget table; raised budget disabled for session");
+    }
+}
+
+// ===================== what the game is actually using (rage-graphics-five) =====================
+// The DXGI probe above can only say what Windows is willing to hand this process. This says what
+// the game has actually spent, because grcResourceCache keeps the running total itself and Cfx
+// exports the getter. Texture loss IS this number reaching the ceiling (eviction inside GTA5.exe
+// is passive-only, cfx #3874), so a log line saying how close it got turns "my textures went
+// missing" into something a log can answer instead of a guess about the player's card.
+//
+// Only GetUsedPhysicalMemory is called. It is a plain field read (`mov rax,[rcx+0x20168]; ret`).
+// grcResourceCache::GetTotalPhysicalMemory is deliberately NOT used: it calls the game's own
+// _getAndUpdateAvailableMemory, which is a call INTO engine code that updates state, and the
+// ceiling is already known here without asking (it is whatever the budget table holds).
+typedef void*    (*GrcInstance_t)();
+typedef uint64_t (*GrcUsed_t)(void*);
+static GrcInstance_t g_grcInstance = nullptr;
+static GrcUsed_t     g_grcUsed = nullptr;
+static bool     g_poolTried = false;
+static bool     g_poolSaid = false;      // the one-time "here is your pool" line
+static bool     g_poolWarned = false;    // the one-time "pool is nearly full" line
+static long     g_poolTicks = 0;
+
+// SEH because GetInstance is a jump through a pointer rage-graphics-five fills in at runtime:
+// before the graphics device exists it is still null, and a beat can land there.
+static bool poolUsedBytes(uint64_t* used)
+{
+    __try {
+        void* cache = g_grcInstance();
+        if (!cache) return false;
+        *used = g_grcUsed(cache);
+        return *used != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void poolBeat()
+{
+    if (!g_poolTried) {
+        g_poolTried = true;
+        g_grcInstance = (GrcInstance_t)cfxSymbol("rage-graphics-five.dll", "?GetInstance@grcResourceCache@rage@@SAPEAV12@XZ");
+        g_grcUsed     = (GrcUsed_t)cfxSymbol("rage-graphics-five.dll", "?GetUsedPhysicalMemory@grcResourceCache@rage@@QEAA_KXZ");
+        if (!g_grcInstance || !g_grcUsed)
+            LOG_DEBUG(LogCategory::Audit, "Texture pool: FiveM's grcResourceCache exports are missing; usage not reported");
+    }
+    if (!g_grcInstance || !g_grcUsed) return;
+
+    uint64_t used = 0;
+    if (!poolUsedBytes(&used)) return;
+    uint64_t ceiling = g_budget ? g_budget : g_budgetCurr;   // ours if we raised it, else FiveM's
+    if (!ceiling) return;
+
+    double pct = used * 100.0 / ceiling;
+    LOG_DEV(LogCategory::Audit, "pool %.2f GB of %.2f GB (%.1f%%)", used / 1073741824.0, ceiling / 1073741824.0, pct);
+    if (!g_poolSaid) {
+        g_poolSaid = true;
+        LOG_INFO(LogCategory::Audit, "Texture pool: %.1f GB of %.1f GB in use (%.0f%%)",
+                 used / 1073741824.0, ceiling / 1073741824.0, pct);
+    }
+    // Once a minute at DEBUG, so a _debug.txt session has a timeline to point at when a player
+    // says the world went low-detail at a particular moment.
+    else if (++g_poolTicks % 60 == 0)
+        LOG_DEBUG(LogCategory::Audit, "Texture pool: %.1f GB of %.1f GB in use (%.0f%%)",
+                  used / 1073741824.0, ceiling / 1073741824.0, pct);
+
+    if (!g_poolWarned && used * 10 >= ceiling * 9) {
+        g_poolWarned = true;
+        LOG_WARN(LogCategory::Audit, "Texture pool is %.0f%% full (%.1f of %.1f GB). This is what texture loss looks like: "
+                                     "shrink the HEAVY files above, or raise texture_budget in _settings.txt",
+                 pct, used / 1073741824.0, ceiling / 1073741824.0);
     }
 }
 

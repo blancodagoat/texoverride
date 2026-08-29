@@ -3,6 +3,7 @@
 #include "core/logger.h"
 #include "core/utils.h"
 #include "core/pattern.h"
+#include "core/cfx.h"
 #include <windows.h>
 #include <cstring>
 #include <string>
@@ -40,6 +41,32 @@ void resolveOccupiedSlotExports()
     if (!g_getRawEntriesFn)
         g_getRawEntriesFn = (GetRawEntries_t)GetProcAddress(streamingDll,
             "?GetPgRawStreamerEntries@rage@@YAAEBU?$chunkyArray@URawEntry@fiCollection@rage@@$0EAA@$0EA@@1@XZ");
+}
+
+// What a loaded slot really costs, dependencies included. The cost audit at scan time can only
+// read the RSC7 page flags out of the file on disk, which is the file's own size and nothing
+// more; a clothing .ydd that drags three shared texture dictionaries in with it is charged for
+// none of them there. FiveM's own devtools walks the dependency tree and adds it all up, and
+// exports the walk, so once a slot is resident the honest figure is one call away.
+//
+// Read-only: it looks up the streaming module (moduleMgr at +0x1B8, the offset Cfx's Streaming.h
+// uses too), asks it for the dependency list, and recurses. SEH because it walks game-owned
+// arrays that a mid-eviction slot can leave half valid.
+typedef uint64_t (*CountDepMem_t)(void* mgr, uint32_t idx);
+static CountDepMem_t g_countDepMemFn = nullptr;
+static bool g_countDepTried = false;
+
+uint64_t slotMemoryCost(uint32_t id)
+{
+    if (!g_countDepTried) {
+        g_countDepTried = true;
+        g_countDepMemFn = (CountDepMem_t)cfxSymbol("devtools-five.dll", "?CountDependencyMemory@@YA_KPEAVManager@streaming@@I@Z");
+    }
+    if (!g_countDepMemFn || !g_getStreamingManagerFn || !validStreamingId(id)) return 0;
+    __try {
+        void* mgr = g_getStreamingManagerFn();
+        return mgr ? g_countDepMemFn(mgr, id) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
 // Contains no C++ objects so the virtual lookup can be isolated behind SEH. XBRVirtual inserts

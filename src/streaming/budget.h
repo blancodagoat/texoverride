@@ -27,5 +27,6 @@ void decideBudgetImpl();
 void decideBudget();
 void budgetBeatImpl();
 void budgetBeat();
+void poolBeat();
 void costReport();
 void readBudgetFile();

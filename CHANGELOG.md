@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.14 (2026-08-29)
+
+- Live reload now runs on FiveM's own per-frame event instead of a patch into the game's message
+  pump. One less patch into the game, and the work always lands on the game thread. If a FiveM
+  update ever stops exporting that event, the old pump is still there as a fallback, and the log
+  says which one it used.
+- New refresh key. Press F11 in game and the plugin reads `tex_overrides` again straight away,
+  the way SA modloader worked. Set `refresh_key` in `_settings.txt` to any f1 to f12 key, a
+  letter, a digit, or `off` to switch it off. It only responds while the game window is focused,
+  and it always writes a line in the log, including "nothing has changed since the last look", so
+  a key that finds nothing never looks like a key that does not work.
+- Tattoo placement files with only one or two presets now work, and so do files where you edited
+  every value. The layout only has to be worked out once per session, and every file after that
+  is matched by its preset names alone.
+- The log now says how much of the texture budget the game is actually using, and warns once when
+  it passes 90 percent. That is the number every "my textures went missing" report needed and
+  nobody had.
+- Each file now reports what it really costs in memory, including the textures it shares with
+  other items. The old figure came from the file on disk, which charged a model nothing for the
+  textures it pulls in with it.
+- The live-reload watcher no longer waits forever on a server that streams nothing of its own.
+
 ## 0.8.13 (2026-08-29)
 
 - The old marker files migrate themselves and then go away. 0.8.12 left two ways to set every

@@ -21,8 +21,13 @@
 // user's own file against memory (preset name hashes give base+stride; the unedited uv/scale/rot
 // values must match memory for >=70% of presets before a single byte is written). Wrong build,
 // wrong file, wrong layout -> nothing matches -> nothing is written.
-// ponytail: >=70% consensus means a file where nearly every preset was edited can't be verified;
-// keep most values stock. Ship vanilla sidecar values if that ever becomes a real limit.
+//
+// That fingerprint only has to succeed ONCE per session. Every decoration collection in the game
+// is the same C++ type, so the layout it produces is the answer for all of them, and the first
+// file that solves publishes it below. After that a collection is confirmed by its own preset
+// name hashes alone — all of them, in order, 32 bits each — which needs neither three presets nor
+// mostly-stock values. A file with one preset, or with every value edited, works as long as some
+// other file in tex_overrides fingerprinted first.
 
 uint32_t joaat(const char* s, size_t n)   // GTA's case-insensitive hash
 {
@@ -69,7 +74,7 @@ void parsePlacementXml(const std::string& path, const char* fname, std::vector<P
         if (ok) { p.hash = joaat(nm.c_str(), nm.size()); pc.presets.push_back(p); }
         pos = end + 7;
     }
-    if (pc.presets.size() < 3) { LOG_WARN(LogCategory::Tattoo, "Placement: %s has %zu preset(s) (need 3+ to fingerprint), ignored", fname, pc.presets.size()); return; }
+    if (pc.presets.empty()) { LOG_WARN(LogCategory::Tattoo, "Placement: %s has no readable presets, ignored", fname); return; }
     out.push_back(std::move(pc));
 }
 
@@ -88,9 +93,45 @@ void placementLocate()
     LOG_INFO(LogCategory::Tattoo, "PedDecorationManager @ %p, collections at +0x%x", (void*)g_decorMgr, off);
 }
 
+// The session-wide answer, published by the first fingerprint that succeeds.
+static bool     g_layoutKnown = false;
+static uint32_t g_layArr = 0, g_layName = 0, g_layStride = 0, g_layUv = 0;
+
+// Confirm the known layout against THIS collection: the array must hold exactly our preset count
+// and every preset name hash must land where the layout says it does. Values are not consulted,
+// which is the whole point — an edited file still verifies.
+static bool layoutFits(const PlColl& pc, uint8_t* coll)
+{
+    uint8_t* P = *(uint8_t**)(coll + g_layArr);
+    if ((uintptr_t)P < 0x10000) return false;
+    if (*(uint16_t*)(coll + g_layArr + 8) != (uint16_t)pc.presets.size()) return false;
+    for (size_t i = 0; i < pc.presets.size(); ++i)
+        if (*(uint32_t*)(P + i * g_layStride + g_layName) != pc.presets[i].hash) return false;
+    return true;
+}
+
 bool placementSolveImpl(PlColl& pc, uint8_t* coll)
 {
     const size_t N = pc.presets.size();
+
+    if (g_layoutKnown && layoutFits(pc, coll)) {
+        pc.arrOff = g_layArr; pc.nameOff = g_layName; pc.stride = g_layStride; pc.uvOff = g_layUv;
+        pc.solved = true;
+        LOG_INFO(LogCategory::Tattoo, "%s matched the layout already solved this session (%zu preset(s), no fingerprint needed)",
+                 pc.name.c_str(), N);
+        return true;
+    }
+    // Fingerprinting is what FINDS the layout, and it needs several presets and mostly stock
+    // values to be worth trusting. A thinner file just waits: any other file that solves hands
+    // it the answer through the fast path above.
+    if (N < 3) {
+        if (!pc.notedThin) {
+            pc.notedThin = true;
+            LOG_WARN(LogCategory::Tattoo, "Placement: %s has only %zu preset(s), too few to work out the layout on its own; "
+                                          "it applies as soon as another placement file with 3+ presets is solved", pc.src.c_str(), N);
+        }
+        return false;
+    }
     for (uint32_t o = 0; o + 10 <= 0xA0; o += 8) {                      // candidate atArray slots (ptr + count must fit in the 0xA0 struct)
         uint8_t* P = *(uint8_t**)(coll + o);
         if ((uintptr_t)P < 0x10000) continue;
@@ -113,6 +154,10 @@ bool placementSolveImpl(PlColl& pc, uint8_t* coll)
                     }
                     if (hits * 10 >= N * 7) {                           // >=70% stock values: layout confirmed
                         pc.arrOff = o; pc.nameOff = a; pc.stride = s; pc.uvOff = f; pc.solved = true;
+                        if (!g_layoutKnown) {
+                            g_layoutKnown = true;
+                            g_layArr = o; g_layName = a; g_layStride = s; g_layUv = f;
+                        }
                         LOG_INFO(LogCategory::Tattoo, "%s layout solved (array@+0x%02x stride=0x%x uv+0x%x, %zu/%zu stock matched)",
                                  pc.name.c_str(), o, s, f, hits, N);
                         return true;

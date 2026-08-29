@@ -28,6 +28,7 @@ StrMgr* g_mgr = nullptr;
 volatile LONG g_regTotal = 0;
 volatile LONG g_redirects = 0;
 volatile LONG g_idsReady = 0;
+volatile LONG g_firstLoadDone = 0;
 long g_reclaims = 0;
 long g_deferred = 0;
 long g_lateBinds = 0;
@@ -61,6 +62,8 @@ volatile LONG g_opsPending = 0;
 ULONGLONG g_journalClearAt = 0;
 PeekMsg_t g_origPeek = nullptr;
 DWORD g_pumpTid = 0;
+bool g_pumpReady = false;
+HANDLE g_refreshEvent = nullptr;
 std::unordered_map<std::string, Snap> g_snap;
 
 uint64_t* g_vramTable = nullptr;

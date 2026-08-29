@@ -52,6 +52,16 @@ texture_budget = auto
 auto_update = no
 
 
+# Key that rescans tex_overrides straight away.
+#
+# The plugin normally notices new and changed files on its own. This is the
+# manual version: press the key in game and it looks again immediately, which
+# is handy while you are trying things out. Write off to disable it.
+#
+#   f1 to f12, or a single letter or digit
+refresh_key = f11
+
+
 # Never check whether a new version is out.
 # Normally the plugin asks GitHub for the newest version number when it starts.
 # Turning this on stops that, and then it never uses the internet at all.
@@ -71,6 +81,27 @@ static std::string trim(const std::string& s)
 static bool truthy(const std::string& v)
 {
     return v == "yes" || v == "on" || v == "true" || v == "1" || v == "enabled";
+}
+
+// The refresh key, as a Windows virtual-key code. 0 means the user turned it off, -1 means they
+// wrote something that is not a key, which is worth a warning rather than a silent default.
+// GetAsyncKeyState rather than FiveM's InputHook::IsKeyDown on purpose. It needs no export a
+// FiveM update could rename, and the foreground check below is what IsKeyDown would have bought:
+// pressing the key in a browser while the game runs behind it must not rescan anything.
+int vkFromName(const std::string& raw)
+{
+    std::string v = lower(raw);
+    if (v.empty() || v == "off" || v == "no" || v == "none" || v == "disabled") return 0;
+    if (v.size() >= 2 && v[0] == 'f') {
+        int n = atoi(v.c_str() + 1);
+        if (n >= 1 && n <= 12) return VK_F1 + n - 1;
+    }
+    if (v.size() == 1) {
+        char c = v[0];
+        if (c >= 'a' && c <= 'z') return 'A' + (c - 'a');
+        if (c >= '0' && c <= '9') return c;
+    }
+    return -1;   // written down, but not a key we know
 }
 
 // Splits "key = value" into its two halves, lowercased. Blank lines and notes give no key.
@@ -144,6 +175,7 @@ void loadSettings()
         else if (k == "auto_update")     g_set.autoUpdate    = g_set.autoUpdate    || truthy(v);
         else if (k == "no_update_check") g_set.noUpdateCheck = g_set.noUpdateCheck || truthy(v);
         else if (k == "texture_budget" && g_set.budget.empty()) g_set.budget = v;
+        else if (k == "refresh_key") g_set.refreshKey = v;
     }
     fclose(f);
 }

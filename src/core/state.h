@@ -36,6 +36,7 @@ extern StrMgr* g_mgr;
 extern volatile LONG g_regTotal;
 extern volatile LONG g_redirects;
 extern volatile LONG g_idsReady;
+extern volatile LONG g_firstLoadDone;   // FiveM said the game finished its first load
 extern long g_reclaims;
 extern long g_deferred;
 extern long g_lateBinds;
@@ -72,6 +73,8 @@ extern volatile LONG g_opsPending;
 extern ULONGLONG g_journalClearAt;
 extern PeekMsg_t g_origPeek;
 extern DWORD g_pumpTid;
+extern bool g_pumpReady;   // a main-thread pump is live, whichever of the two it is
+extern HANDLE g_refreshEvent;   // set by the refresh key, waited on by the watcher thread
 extern std::unordered_map<std::string, Snap> g_snap;
 
 extern uint64_t* g_vramTable;

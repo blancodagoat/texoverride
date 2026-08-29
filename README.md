@@ -109,6 +109,11 @@ folder while you play and reacts on its own when something in it changes.
   the game reloads that item. Take the clothing or tattoo off and put it back on to force that.
   This is the one you want while you are working on a texture, and it always works.
 - Drop in a file with a name nothing else uses and it is picked up right away.
+- Do not want to wait? Press **F11** in game and the folder is read again straight away. It only
+  works while the game window is focused, and it always writes a line in the log, even when
+  nothing has changed, so a key that finds nothing never looks like a key that is broken. To use
+  a different key, set `refresh_key` in `_settings.txt` to any `f1` to `f12` key, a letter, a
+  digit, or `off`.
 
 The one thing that cannot happen live is taking over a name the server or a DLC has already
 loaded. Once the game holds a name it will not hand it over until it restarts, so the log says so
@@ -173,6 +178,7 @@ notes and the plugin skips them.
 | `texture_budget` | `auto`, `game`, or a number of GB |
 | `auto_update` | Installs new versions without asking |
 | `no_update_check` | Never checks whether a new version is out |
+| `refresh_key` | Which key reads the folder again, `f1` to `f12`, a letter, a digit, or `off` |
 
 `yes`, `on`, `true` and `1` all mean on. Anything else means off. Capital letters do not matter.
 
