@@ -63,6 +63,7 @@ ULONGLONG g_journalClearAt = 0;
 PeekMsg_t g_origPeek = nullptr;
 DWORD g_pumpTid = 0;
 bool g_pumpReady = false;
+bool g_framePumpConnected = false;
 HANDLE g_refreshEvent = nullptr;
 std::unordered_map<std::string, Snap> g_snap;
 

@@ -74,6 +74,7 @@ extern ULONGLONG g_journalClearAt;
 extern PeekMsg_t g_origPeek;
 extern DWORD g_pumpTid;
 extern bool g_pumpReady;   // a main-thread pump is live, whichever of the two it is
+extern bool g_framePumpConnected;   // connected to FiveM's OnMainGameFrame in Setup()
 extern HANDLE g_refreshEvent;   // set by the refresh key, waited on by the watcher thread
 extern std::unordered_map<std::string, Snap> g_snap;
 

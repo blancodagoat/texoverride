@@ -26,8 +26,10 @@ void* cfxSymbol(const char* dll, const char* mangled)
 //              int order;                             0x48
 //              size_t cookie; }                       0x50, node is 0x58 total
 //
-// Nodes are inserted in ascending `order`, and the handler returning false stops the rest of the
-// chain from running, so ours always returns true.
+// Cfx inserts in ascending `order`; we always prepend with order 0, because a single atomic
+// write is the only splice that cannot destroy a node FiveM added at the same moment (see
+// cfxConnect). A handler that returns false stops the rest of the chain from running, so ours
+// always returns true.
 //
 // Two things make this safe to do from outside Cfx's build:
 //   - the node holds a std::function whose copy/delete run through ITS OWN vtable, which is our
@@ -55,28 +57,27 @@ struct CfxEvent
     volatile LONG64 nextCookie;
 };
 
-bool cfxConnect(void* fwEventObject, std::function<bool()> fn, int order)
+bool cfxConnect(void* fwEventObject, std::function<bool()> fn)
 {
     if (!fwEventObject) return false;
     auto* ev = (CfxEvent*)fwEventObject;
 
     void* mem = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CfxEventNode));
     if (!mem) return false;
-    auto* node = new (mem) CfxEventNode{ std::move(fn), nullptr, order, 0,
+    auto* node = new (mem) CfxEventNode{ std::move(fn), nullptr, 0, 0,
                                          (size_t)InterlockedIncrement64(&ev->nextCookie) };
 
-    // Insert before the first node with a strictly greater order, which is what Cfx's own
-    // Connect does. Cfx takes no lock and neither do we, but unlike Cfx we connect long after
-    // the game is running, so the main thread IS walking this list while we splice into it.
-    // That is safe here and only here: the node's own next pointer is published before the
-    // pointer TO the node, both stores are aligned and x86-64 does not reorder stores, so a
-    // walker either misses us for one frame or sees a node that is already complete. Nothing
-    // is ever removed, so no walker can be left holding a freed node.
-    // ponytail: lock-free prepend, single writer. It needs a real lock the day anything in the
-    // plugin disconnects, or connects from two threads at once.
-    CfxEventNode** slot = &ev->head;
-    while (*slot && (*slot)->order <= order) slot = &(*slot)->next;
-    node->next = *slot;
-    *slot = node;
-    return true;
+    // Prepend with one atomic write, never Cfx's ordered walk. Cfx's own Connect takes no lock
+    // and splices with plain stores, so if we walk and store too, a component connecting at the
+    // same moment can have ITS node dropped on the floor - and a FiveM handler that quietly goes
+    // missing during load is a crash somewhere else entirely, several seconds later, with
+    // nothing of ours anywhere near the stack. A compare-exchange on the head can only ever lose
+    // OUR node, never theirs. Callers connect from Setup(), where nothing else is inserting yet,
+    // so in practice it never even retries.
+    for (;;) {
+        CfxEventNode* head = ev->head;
+        node->next = head;   // published before the pointer TO the node; x86-64 keeps that order
+        if (InterlockedCompareExchangePointer((void* volatile*)&ev->head, node, head) == head)
+            return true;
+    }
 }

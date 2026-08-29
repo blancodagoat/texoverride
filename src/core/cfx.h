@@ -10,4 +10,4 @@ void* cfxSymbol(const char* dll, const char* mangled);
 
 // Subscribe to one of Cfx's exported fwEvent objects. Returns false if the event pointer is
 // null or the node could not be allocated; the caller is expected to have a fallback.
-bool cfxConnect(void* fwEventObject, std::function<bool()> fn, int order = 0);
+bool cfxConnect(void* fwEventObject, std::function<bool()> fn);

@@ -376,8 +376,24 @@ DWORD WINAPI UpdateCheck(LPVOID)
         downloadUrl = "https://github.com/blancodagoat/texoverride/releases/download/" + latest + "/texoverride.asi";
     }
 
-    // the release notes carry "<64 hex> *texoverride.asi" from CI; without it nothing is installed
+    // Where the expected SHA-256 comes from. GitHub publishes it on the asset itself
+    // ("digest":"sha256:...", right after the asset's name), and that is the source of truth: it
+    // cannot be edited, and it cannot be lost. The release notes carry the same hash from CI as
+    // "<64 hex> *texoverride.asi", but the notes are prose, and re-uploading them by hand after a
+    // wording fix drops the CI footer with the hash in it. That happened to 0.8.14 and it left
+    // every 0.8.13 install unable to update itself. Notes are now only the fallback.
     std::string expectHash;
+    if (assetPos != std::string::npos) {
+        // Bounded by this asset's own browser_download_url, which GitHub emits after digest, so
+        // the hash can never be read off the .zip entry sitting next to it.
+        size_t end = body.find("\"browser_download_url\"", assetPos);
+        size_t sha = body.find("\"digest\":\"sha256:", assetPos);
+        if (sha != std::string::npos && sha < end && sha + 17 + 64 <= body.size()) {
+            std::string hx = body.substr(sha + 17, 64);
+            if (hx.find_first_not_of("0123456789abcdef") == std::string::npos) expectHash = hx;
+        }
+    }
+    if (expectHash.empty())
     { size_t m = body.find(" *texoverride.asi");   // the notes also say **texoverride.asi** in prose
       if (m != std::string::npos && m >= 64) {
           std::string hx = body.substr(m - 64, 64);

@@ -364,7 +364,6 @@ static void connectFirstLoad()
 
 DWORD WINAPI BeatLoop(LPVOID)
 {
-    connectFirstLoad();
     int beatOurs = 0, beatTheirs = 0, beatLoaded = 0;   // ours / re-taken / resident right now
     long watchWait = 0;                                // ticks spent waiting for a start signal
     long heavyInMemory = 0;
@@ -451,7 +450,6 @@ DWORD WINAPI BeatLoop(LPVOID)
                 placementBeatSafe();   // apply/re-assert tattoo placement edits
                 LeaveCriticalSection(&g_cs);
                 budgetBeat();          // re-assert the raised texture budget (aligned data writes)
-                poolBeat();            // report what the game is actually spending of it
             }
         }
 
@@ -559,6 +557,20 @@ void Setup()
                 else LOG_INFO(LogCategory::Core, g_off ? "Hooked, disabled" : "LIVE — will register base overrides on first stream call");
             }
         }
+    }
+
+    // Both subscriptions to FiveM's own frame events happen HERE, on the loader thread, and that
+    // timing is the whole safety argument. FiveM loads plugins from LauncherInterface::PostLoadGame,
+    // which has not yet handed the game its entry point, so no game thread is running and no Cfx
+    // component is inserting into these event lists. 0.8.14 connected from worker threads a second
+    // or two later instead, which is the middle of the game's own init and exactly when Cfx
+    // components subscribe; two unsynchronised splices into one list can drop a handler, and a
+    // FiveM handler that quietly goes missing during load is a crash seconds later with nothing of
+    // ours on the stack. Connecting this early also means OnFirstLoadCompleted can actually fire
+    // for us, which it never did when we arrived after the first load had already finished.
+    if (!g_off) {
+        g_framePumpConnected = connectFramePump();
+        connectFirstLoad();
     }
 }
 

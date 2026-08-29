@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.15 (2026-08-30)
+
+- Fixes the crash on startup that 0.8.14 brought in. Several people saw the game die once or
+  twice during loading before it would start. 0.8.14 was the first version to hook into FiveM's
+  own per-frame events, and it did that from a background thread a second or two into loading,
+  which is the exact moment FiveM's own components are doing the same thing. Two threads editing
+  the same list with no lock can lose an entry, and the entry that goes missing is not ours. The
+  plugin now signs up while the game is still being handed to FiveM, before any of that starts,
+  and the sign-up itself is a single atomic write that cannot drop somebody else's entry.
+- The texture pool reading is taken on the game's own thread now, instead of from the plugin's
+  background thread. It asks the game for a pointer, and a question like that belongs where the
+  game asks it.
+- The plugin can update itself again. It checks the download against a SHA-256 before installing
+  anything, and it used to read that hash out of the release notes, which meant a hand-edited
+  release page left it with nothing to check against and every install stuck on the old version.
+  It now reads the hash GitHub publishes on the file itself, and only falls back to the notes.
+
 ## 0.8.14 (2026-08-29)
 
 - Live reload now runs on FiveM's own per-frame event instead of a patch into the game's message

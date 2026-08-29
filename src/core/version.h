@@ -1,3 +1,3 @@
 #pragma once
 
-#define TEXOVERRIDE_VERSION "0.8.14"
+#define TEXOVERRIDE_VERSION "0.8.15"
