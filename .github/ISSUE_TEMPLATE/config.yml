@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: My antivirus called it a trojan
+    url: https://github.com/blancodagoat/texoverride/blob/main/docs/antivirus.md
+    about: Why scanners flag it, how to check the file is genuine, and what to keep switched on.
+  - name: A file did not show up in game
+    url: https://github.com/blancodagoat/texoverride/blob/main/docs/replacing-files.md
+    about: Where each kind of file goes, with examples. Check this before filing a bug.

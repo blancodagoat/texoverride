@@ -1,0 +1,76 @@
+name: Plugin will not load
+description: FiveM says "Couldn't load texoverride.asi" and there is no texoverride.log
+labels: [wont-load]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This means Windows refused the file before any of the plugin's own code ran, so there is
+        no log to read. The four checks below are the whole diagnosis. Please run them first, they
+        are in the README under
+        [It says "Couldn't load texoverride.asi"](https://github.com/blancodagoat/texoverride#it-says-couldnt-load-texoverrideasi).
+  - type: input
+    id: version
+    attributes:
+      label: Which version did you download
+      placeholder: v0.8.13
+    validations:
+      required: true
+  - type: input
+    id: size
+    attributes:
+      label: What size is texoverride.asi
+      description: Right click the file, Properties. Give the exact number of bytes. A size that does not match the release notes means the download is damaged.
+      placeholder: 392,704 bytes
+    validations:
+      required: true
+  - type: dropdown
+    id: av
+    attributes:
+      label: Antivirus besides Windows Defender
+      description: Trial versions that came with the PC count. These block unsigned files from loading into a game silently, with nothing shown anywhere.
+      options:
+        - None, Windows Defender only
+        - McAfee
+        - Norton
+        - Avast or AVG
+        - Kaspersky
+        - Something else (say which in the notes below)
+    validations:
+      required: true
+  - type: dropdown
+    id: sac
+    attributes:
+      label: Smart App Control
+      description: Windows Security, then App and browser control. Antivirus exclusions do not apply to it.
+      options:
+        - "Off"
+        - "On"
+        - Evaluation
+        - Not there on my Windows version
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: loadlibrary
+    attributes:
+      label: What the PowerShell test printed
+      description: |
+        Paste this into PowerShell and put both numbers here. This is the check that names the cause.
+
+        ```powershell
+        Add-Type -Name W -Namespace N -MemberDefinition '[DllImport("kernel32", SetLastError=true)] public static extern IntPtr LoadLibrary(string p);'
+        $p = "$env:LOCALAPPDATA\FiveM\FiveM.app\plugins\texoverride.asi"
+        [N.W]::LoadLibrary($p)
+        [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        ```
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Your FiveM game build, a screenshot of the error, or anything you already tried.
+    validations:
+      required: false
