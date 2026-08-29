@@ -218,10 +218,13 @@ uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asNa
                 // A loose file we could actually take over, so it answers "what can I override
                 // here". Worth listing, but a big server streams enough of them to be worth a cap,
                 // and THIS is the line the 500 cap was always meant for.
-                if (++g_collListed <= 500)
+                // debug lifts it: the one job the cap gets in the way of is looking up the exact
+                // name of a specific server prop, which is the whole reason to read this list, and
+                // a player who has gone and turned debug on has asked for the long version.
+                if (++g_collListed <= 500 || g_set.debug)
                     LOG_INFO(LogCategory::Collection, "Server file:       %-40s [overridable, put yours in tex_overrides/]", coll.c_str());
                 else if (g_collListed == 501)
-                    LOG_WARN(LogCategory::Collection, "500 overridable server files listed; the rest are counted only");
+                    LOG_WARN(LogCategory::Collection, "500 overridable server files listed; the rest are counted only - set debug = yes in _settings.txt to list them all");
             }
             else {
                 // Refused on TYPE or PREFIX, never on a name we might one day learn: a .ymap will

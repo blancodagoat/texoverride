@@ -17,6 +17,11 @@
   make one. A marker file turns its option on and `_settings.txt` cannot switch it back off, so
   delete the marker file to go back to the settings file.
 
+- `debug = yes` now lists every overridable server file instead of stopping at 500, and names the
+  ones it used to only count. Looking up the exact name of one server prop is the main reason to
+  read that part of the log, and the cap got in the way of the one job it has. The default is
+  unchanged, so nobody who has not asked for it pays the extra log lines.
+
 - A file with no `RSC7` header is refused instead of loaded. Those are raw dumps rather than real
   game files, usually a texture renamed to `.ytd` or something pulled out with the wrong export
   option, and the game dies in its own loader with "Invalid fixup, address is neither virtual nor

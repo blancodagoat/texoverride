@@ -551,11 +551,13 @@ The three tags on a `Server collection` line mean:
 - `OTHER - never touched`, a story or ambient character. The plugin refuses these on purpose.
 
 Collections are always listed, refused ones included, because that list is how new character names
-get found. Loose files are treated differently: the ones you can replace are listed, and everything
-else the server streams (car parts, props, map pieces, often tens of thousands of files) is only
-counted. Those names cannot ever be used, so listing them buried the useful lines and slowed the
-game down while it wrote them. Set `debug = yes` in `_settings.txt` if you want the full list
-back.
+get found. Loose files are treated differently. The ones you can replace are listed, up to 500 of
+them. Everything else the server streams (car parts, map pieces, often tens of thousands of files)
+is only counted, because those names can never be used, and listing them buried the useful lines
+and slowed the game down while it wrote them.
+
+Set `debug = yes` in `_settings.txt` and both limits come off: every file is named and the 500
+limit no longer applies. That is how you find the exact name of one particular server prop.
 
 ## How it works
 
