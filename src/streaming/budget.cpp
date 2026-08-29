@@ -2,6 +2,7 @@
 #include "core/state.h"
 #include "core/logger.h"
 #include "core/utils.h"
+#include "core/settings.h"
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <cstdio>
@@ -111,7 +112,7 @@ void decideBudgetImpl()
                      g_budget / 1073741824.0, g_budgetCurr / 1073741824.0);
             g_budget = 0;
         }
-        else LOG_INFO(LogCategory::Audit, "Texture budget: _budget.txt requested %.1f GB (up from %.1f GB)",
+        else LOG_INFO(LogCategory::Audit, "Texture budget: Settings asked for %.1f GB (up from %.1f GB)",
                       g_budget / 1073741824.0, g_budgetCurr / 1073741824.0);
         return;
     }
@@ -182,16 +183,25 @@ void costReport()
 // backgroundStartup), and the placement parse is not needed until the first beat.
 void readBudgetFile()
 {
+    // A _budget.txt holding a number is the older way to set this and still wins, because
+    // someone who wrote one meant it. Otherwise texture_budget in _settings.txt decides.
+    std::string src = "_budget.txt", val;
     std::string bp = ctlPath("_budget");
-    if (bp.empty()) return;
-    FILE* bf = nullptr;
-    if (!fopen_s(&bf, bp.c_str(), "rb") && bf) {
-        char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
-        double gb = atof(buf);
-        if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
-        else {
-            g_budgetWant = 0.0;
-            LOG_WARN(LogCategory::Audit, "Texture budget: _budget.txt does not hold a valid number (1-48 GB); left at game default");
+    if (!bp.empty()) {
+        FILE* bf = nullptr;
+        if (!fopen_s(&bf, bp.c_str(), "rb") && bf) {
+            char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
+            val = lower(std::string(buf));
         }
+    }
+    if (val.empty()) { src = "texture_budget"; val = g_set.budget; }
+    if (val.empty() || val.find("auto") == 0) return;          // auto: leave g_budgetWant at -1
+
+    double gb = atof(val.c_str());
+    if (val.find("game") == 0 || val.find("off") == 0 || gb == 0.0) g_budgetWant = 0.0;
+    else if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
+    else {
+        g_budgetWant = 0.0;
+        LOG_WARN(LogCategory::Audit, "Texture budget: %s is not auto, game, or a number from 1 to 48; left at game default", src.c_str());
     }
 }

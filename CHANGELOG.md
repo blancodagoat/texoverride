@@ -2,12 +2,20 @@
 
 ## 0.8.12 (2026-08-29)
 
-- Settings files all follow one rule now (issue #20 by chocomintw). `_off`, `_debug`, `_verbose`,
-  `_budget`, `_auto_update` and `_no_update_check` are each accepted with or without a `.txt` on
-  the end, so it no longer matters whether Windows is hiding file extensions when you create one.
-  Nothing has to be renamed: every file that worked before still works. The docs name the `.txt`
-  form for all of them, and the README has a table listing what each one does. Capital letters
-  never mattered and still do not.
+- One settings file instead of a folder of oddly named marker files (issue #20 by chocomintw).
+  The plugin writes `_settings.txt` into `tex_overrides` on first run. Every option is in it,
+  switched off, with a plain English note above it saying what it does. Change `no` to `yes`,
+  save, restart FiveM. The options are `off`, `debug`, `texture_budget`, `auto_update` and
+  `no_update_check`. `yes`, `on`, `true` and `1` all mean on, and capital letters do not matter.
+
+  The file is only ever created, never rewritten, so your edits and any notes you add survive
+  updates. Delete it to get a fresh one.
+
+  Nothing breaks for anyone using the old marker files. `_off`, `_debug`, `_verbose`, `_budget`,
+  `_auto_update` and `_no_update_check` all still work, and now each is accepted with or without
+  `.txt` on the end, so it no longer matters whether Windows is hiding file extensions when you
+  make one. A marker file turns its option on and `_settings.txt` cannot switch it back off, so
+  delete the marker file to go back to the settings file.
 
 - A file with no `RSC7` header is refused instead of loaded. Those are raw dumps rather than real
   game files, usually a texture renamed to `.ytd` or something pulled out with the wrong export

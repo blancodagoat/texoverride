@@ -3,6 +3,7 @@
 #include "core/state.h"
 #include "core/logger.h"
 #include "core/utils.h"
+#include "core/settings.h"
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
@@ -325,7 +326,7 @@ static bool installUpdate(const std::string& downloadUrl, const std::string& lat
 DWORD WINAPI UpdateCheck(LPVOID)
 {
     if (g_off) return 0;
-    if (!ctlPath("_no_update_check").empty()) return 0;
+    if (g_set.noUpdateCheck) return 0;
 
     std::string body;
     HINTERNET s = WinHttpOpen(L"texoverride", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -395,7 +396,7 @@ DWORD WINAPI UpdateCheck(LPVOID)
             return 0;
         }
 
-        bool autoUpdate = !ctlPath("_auto_update").empty();
+        bool autoUpdate = g_set.autoUpdate;
         bool shouldInstall = autoUpdate;
 
         if (!autoUpdate) {

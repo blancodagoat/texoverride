@@ -3,6 +3,7 @@
 #include "core/state.h"
 #include "core/logger.h"
 #include "core/utils.h"
+#include "core/settings.h"
 #include "core/pattern.h"
 #include "streaming/gate.h"
 #include "streaming/budget.h"
@@ -231,7 +232,7 @@ uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asNa
                 // this thread also held g_cs and the game's main thread sat waiting on g_cs in
                 // drainOps. Count them, say so once, and put the names behind _debug.txt.
                 if (++g_collOther == 1)
-                    LOG_INFO(LogCategory::Collection, "Other server files (vehicle, prop and map data) are counted, not listed - create _debug.txt in tex_overrides to see them");
+                    LOG_INFO(LogCategory::Collection, "Other server files (vehicle, prop and map data) are counted, not listed - set debug = yes in _settings.txt to see them");
                 LOG_DEBUG(LogCategory::Collection, "Server file:       %-40s [OTHER - never touched]", coll.c_str());
             }
         }
@@ -303,6 +304,7 @@ void backgroundStartup()
     crashSaverStartup();
     g_crashSaverRan = true;
     locateRuntimePatterns();
+    writeDefaultSettings();   // first run: leave the user a file that explains itself
     readBudgetFile();
     decideBudget();   // DXGI only works out here, after DllMain has returned
     walkDir(std::string(g_overrideDir), "", g_cands);
@@ -440,7 +442,8 @@ void Setup()
     _snprintf_s(g_overrideDir, MAX_PATH, _TRUNCATE, "%s\\tex_overrides\\", plug.c_str());
     // a download the updater never finished; texoverride.asi.old is kept on purpose (rollback)
     DeleteFileA((std::string(self) + ".download").c_str());
-    g_off = !ctlPath("_off").empty();
+    loadSettings();   // marker files plus _settings.txt; never logs, the log does not exist yet
+    g_off = g_set.off;
     // _off is the diagnostic control. Stop before logs, events, scans, hooks or worker threads
     // so it behaves like an installed but unloaded plugin rather than a bypass inside the hook.
     if (g_off) return;
@@ -450,9 +453,7 @@ void Setup()
     g_logCsInit = true;
     InitializeCriticalSection(&g_cs);   // must exist before the hook can fire
 
-    // check for verbose / debug logging triggers
-    if (!ctlPath("_verbose").empty() || !ctlPath("_debug").empty())
-        g_minLogLevel = LogLevel::Debug;
+    if (g_set.debug) g_minLogLevel = LogLevel::Debug;
 
     // fresh log every launch, but keep one previous generation: after a crash the next launch
     // used to destroy the exact log that showed what the crashed session was doing
