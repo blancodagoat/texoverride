@@ -56,13 +56,14 @@ That message means Windows refused the file before a single line of the plugin r
 1. **Check the file size.** Right click `texoverride.asi`, open Properties, and compare it with the
    size printed in the release notes. If it does not match, the download is damaged and a fresh one
    fixes it.
-2. **Check for antivirus other than Windows Defender.** McAfee, Norton, Avast, AVG and Kaspersky
-   all block unsigned files from loading into a game, silently, with nothing shown anywhere. McAfee
-   is the one that has caused this before, and a trial version that came with the PC counts. Add
+2. **Check Smart App Control.** Windows Security, then App and browser control, then Smart App
+   Control. It blocks unsigned files with no warning at all, it is separate from the antivirus,
+   and antivirus exclusions do not apply to it. This has been the answer before. Be aware it can
+   only be switched off, never back on without reinstalling Windows.
+3. **Check for antivirus other than Windows Defender.** McAfee, Norton, Avast, AVG and Kaspersky
+   all block unsigned files from loading into a game, silently, with nothing shown anywhere.
+   McAfee has been the answer before too, and a trial version that came with the PC counts. Add
    `texoverride.asi` to its exclusions, or remove it, then restart FiveM.
-3. **Check Smart App Control.** Windows Security, then App and browser control. It blocks unsigned
-   files with no warning, it is separate from the antivirus, and exclusions do not apply to it. Be
-   aware it can only be switched off, never back on without reinstalling Windows.
 4. **Test the file on its own.** Paste this into PowerShell:
 
    ```powershell
@@ -73,7 +74,7 @@ That message means Windows refused the file before a single line of the plugin r
    ```
 
    A first number that is not zero means the file loads fine on its own and something only blocks
-   it inside the game, which points back at step 2. A first number of zero means the second number
+   it inside the game, which points back at steps 2 and 3. A first number of zero means the second number
    is the Windows error code, and that names the cause.
 
 Still stuck after all four? [Open a report](../../issues/new/choose), pick "Plugin will not load",

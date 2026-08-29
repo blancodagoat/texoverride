@@ -43,10 +43,11 @@ What you can do:
   trust where you got the file.
 
 **If FiveM shows "Couldn't load texoverride.asi" and there is no `texoverride.log` next to the
-file**, an antivirus stopped the file from loading and did not tell you. McAfee does this. Nothing
-shows up in Windows Security, the file looks fine, and loading it from anywhere else works. Add
-`texoverride.asi` to McAfee's Real-Time Scanning exclusions, or remove McAfee (Windows Defender
-takes over on its own) and restart FiveM.
+file**, something refused the file before any of the plugin's own code ran. Two things have
+caused that so far: Smart App Control, and McAfee. Both block unsigned files silently, neither
+shows anything in Windows Security, and the file looks perfectly fine. Work through
+[the four checks in the README](../README.md#it-says-couldnt-load-texoverrideasi), which name
+both and end with a test that reports the actual Windows error code.
 
 Windows Security settings and the plugin, if you want to check yours:
 
