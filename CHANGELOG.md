@@ -5,7 +5,11 @@
 - Live reload now runs on FiveM's own per-frame event instead of a patch into the game's message
   pump. One less patch into the game, and the work always lands on the game thread. If a FiveM
   update ever stops exporting that event, the old pump is still there as a fallback, and the log
-  says which one it used.
+  says which one it used. To be straight about what this does and does not do: the folder is
+  watched and your changed file is read again, but if the game already has the old version loaded
+  in memory it carries on drawing that, and taking the item off and putting it back on does not
+  reliably force a fresh read. Editing a file the game has not loaded yet is the case that works.
+  For anything already on your ped, restart FiveM.
 - New refresh key. Press F11 in game and the plugin reads `tex_overrides` again straight away,
   the way SA modloader worked. Set `refresh_key` in `_settings.txt` to any f1 to f12 key, a
   letter, a digit, or `off` to switch it off. It only responds while the game window is focused,
