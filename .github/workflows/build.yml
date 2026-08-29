@@ -114,18 +114,20 @@ jobs:
             echo "No ANNOUNCE_TOKEN secret; skipping the announcement."
             exit 0
           fi
-          # the changelog section on its own, minus its heading: notes.md by now also carries the
-          # install blurb and the hashes, and neither of those belongs in a Discord embed.
-          # The second awk unwraps it. CHANGELOG.md is hard wrapped at 100 columns for reading in
-          # a text editor, and pasting that into an embed leaves every sentence broken in a place
-          # that has nothing to do with how wide anybody's Discord window is. Each bullet becomes
-          # one long line and Discord wraps it.
+          # The embed is a headline list, not the changelog. CHANGELOG.md is written for the
+          # release page: every entry leads with what changed and then explains why, wrapped at
+          # 100 columns for reading in an editor. Pasted into an embed that came out long, broken
+          # at the wrong places, and with the indented sub-paragraphs rendering as loose text
+          # between the bullets, so half the list had dots and half did not.
+          # First awk: take the current section, drop its heading, join each top-level bullet
+          # into one line and throw away the sub-paragraphs. Second awk: keep the first sentence.
+          # What is left is one short line per change. The embed title links to the full notes.
           body=$(awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +2 | awk '
-            /^[[:space:]]*$/ { if (line != "") { print line; line = "" } print ""; next }
-            /^- /            { if (line != "") print line; line = $0; next }
-                             { sub(/^[[:space:]]+/, ""); line = (line == "" ? $0 : line " " $0) }
+            /^- /            { if (line != "") print line; line = substr($0, 3); inb = 1; next }
+            /^[[:space:]]*$/ { if (line != "") { print line; line = "" } inb = 0; next }
+                             { if (inb) { sub(/^[[:space:]]+/, ""); line = line " " $0 } }
             END              { if (line != "") print line }
-          ' | sed '/./,$!d')
+          ' | awk '{ i = index($0, ". "); print "- " (i ? substr($0, 1, i) : $0) }')
           url="https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME"
           # Discord caps a description at 4096. Cut early and link out, rather than letting the
           # bot truncate somebody mid-sentence.
