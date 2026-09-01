@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.8.16 (2026-09-01)
+
+- New `hide_overlay` setting keeps FiveM's version text and mod pack counter out of your
+  screenshots. FiveM writes its version in one corner of the screen and "N mod packs loaded" in
+  the other, and both end up in every picture you take. List the keys you take screenshots with,
+  for example `hide_overlay = printscreen, f9`, and those two lines come off the screen for a
+  second and a half when you press one, then come back. Nothing else changes: the server's chat
+  and HUD stay where they are. There is no way to leave the text off, and there will not be one.
+  The branding is FiveM's and the plugin does not remove it; this is only about it not being in
+  your saved pictures.
+  If you already have a `_settings.txt`, add the line yourself. The plugin never rewrites that
+  file, so an existing install does not get the new option on its own.
+  One limit, stated plainly: the text comes off on the next frame, so a tool that grabs the
+  screen in the same instant as the keypress can still catch it. ShareX, Steam and the like grab
+  it a moment later and come out clean. Windows' own PrintScreen to clipboard is the one that
+  may not.
+- This adds no patch into the game. It moves two entries on one of FiveM's own drawing lists
+  and moves them back. Nothing is written into any code, FiveM's or the game's, and the
+  antivirus profile of the file is the same as 0.8.15's.
+
 ## 0.8.15 (2026-08-30)
 
 - Fixes the crash on startup that 0.8.14 brought in. Several people saw the game die once or

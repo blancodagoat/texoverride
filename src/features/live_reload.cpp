@@ -1,4 +1,5 @@
 #include "features/live_reload.h"
+#include "features/clean_shot.h"
 #include "core/state.h"
 #include "core/cfx.h"
 #include "core/settings.h"
@@ -207,6 +208,7 @@ void framePumpTick()
 #endif
     if (g_opsPending) drainOps();
     refreshKeyTick();
+    shotKeyTick();
     // Once a second, on the game's own thread. grcResourceCache::GetInstance is a jump straight
     // into GTA5.exe, and the plugin's standing rule for calls into game code is that they run
     // where the game runs them; 0.8.14 called it from the beat thread every second instead.

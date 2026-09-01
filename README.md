@@ -12,7 +12,7 @@ does it on your computer.
 
 **Something is wrong:** [It will not load](#it-says-couldnt-load-texoverrideasi) &middot; [Textures gone or stuck blurry](#textures-gone-everything-stuck-on-low-detail) &middot; [Your antivirus flagged it](#why-your-antivirus-may-call-it-a-trojan) &middot; [Reading the log](#reading-the-log)
 
-**While you play:** [Changing files as the game runs](#changing-files-while-the-game-runs) &middot; [Update check](#update-check) &middot; [Turning it off](#turning-it-off)
+**While you play:** [Changing files as the game runs](#changing-files-while-the-game-runs) &middot; [Keeping FiveM's text out of screenshots](#keeping-fivems-corner-text-out-of-screenshots) &middot; [Update check](#update-check) &middot; [Turning it off](#turning-it-off)
 
 **About:** [How it works](#how-it-works) &middot; [Ban risk](#ban-risk-stated-plainly) &middot; [Limitations](#limitations) &middot; [Build](#build) &middot; [Credits](#credits) &middot; [Files](#files)
 
@@ -127,6 +127,30 @@ which files were involved. On the next launch it refuses to load them, and the l
 That way one broken file cannot crash the game again and again. When you have fixed or replaced
 the file, delete `_quarantine.txt` from `tex_overrides` and it loads normally again.
 
+## Keeping FiveM's corner text out of screenshots
+
+FiveM writes its version in one corner of the screen and "N mod packs loaded" in the other, and
+both show up in every screenshot. To keep them out, open `_settings.txt` and list the keys you
+take screenshots with:
+
+```
+hide_overlay = printscreen, f9
+```
+
+Press one of those keys and the two lines come off the screen for about a second while the
+picture is taken, then come back. Nothing else on screen changes. The server's chat and HUD stay
+exactly where they are. You can list `printscreen`, any of `f1` to `f12`, a letter, or a digit,
+separated by commas. If you had a `_settings.txt` before this version, add the line yourself; the
+plugin never rewrites that file.
+
+One limit: the text comes off on the next frame, so the screenshot tool has to grab the screen a
+moment after the keypress. ShareX, Steam, Medal and the like all do, and come out clean. Windows'
+own PrintScreen (copy to clipboard) grabs the screen in the same instant as the key and may still
+show the text.
+
+There is no setting to hide the text all the time, and there will not be one. It is FiveM's
+branding, and the plugin does not remove it. It only keeps it out of your pictures.
+
 ## Update check
 
 At startup the plugin asks GitHub one question: what is the newest release number? If a newer
@@ -181,6 +205,7 @@ notes and the plugin skips them.
 | `auto_update` | Installs new versions without asking |
 | `no_update_check` | Never checks whether a new version is out |
 | `refresh_key` | Which key reads the folder again, `f1` to `f12`, a letter, a digit, or `off` |
+| `hide_overlay` | Keys that take FiveM's corner text off the screen for a moment: `printscreen`, `f1` to `f12`, a letter, or a digit |
 
 `yes`, `on`, `true` and `1` all mean on. Anything else means off. Capital letters do not matter.
 

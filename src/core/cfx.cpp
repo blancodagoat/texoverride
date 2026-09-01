@@ -2,6 +2,8 @@
 #include "core/logger.h"
 #include <windows.h>
 #include <new>
+#include <cstring>
+#include "core/state.h"
 
 // Resolved by NAME at runtime, never as a static import. A static import on a FiveM DLL would
 // make the whole ASI fail to load the day a component is renamed or missing, and that failure
@@ -81,3 +83,81 @@ bool cfxConnect(void* fwEventObject, std::function<bool()> fn)
             return true;
     }
 }
+
+static bool readPtr(const void* p, uintptr_t* out)
+{
+    __try { *out = *(const uintptr_t*)p; return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// Which DLL built a node's handler. A small functor lives inside the node and its impl vtable is
+// in that DLL's image, which is how a node is told apart from the outside. Reads are guarded, so
+// a node from a future FiveM that does not look like this comes back as "nobody".
+static HMODULE nodeOwner(CfxEventNode* n)
+{
+    uintptr_t impl = 0, vt = 0;
+    HMODULE m = nullptr;
+    if (readPtr((char*)n + 0x38, &impl) && impl && readPtr((void*)impl, &vt))
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)vt, &m);
+    return m;
+}
+
+// Unlink the nodes those DLLs own, or put them back. This runs on the thread that walks the
+// list (for OnPostFrontendRender, the render thread, from inside our own handler), and that
+// thread reads `next` right before calling each handler, so every pointer it follows is a whole
+// node. Nothing is freed or copied: a parked node keeps its own `next`, and going back it is
+// inserted by Cfx's own rule (after every node whose order is <= its own), starting past the
+// head, so a node Cfx added meanwhile is safe and ours stays in front. The head is never moved.
+int cfxDetachOwned(void* fwEventObject, void** owners, int nOwners, bool detach)
+{
+    static CfxEventNode* parked[8];
+    static int nParked = 0;
+    auto* ev = (CfxEvent*)fwEventObject;
+    if (!ev || !ev->head) return 0;
+    int moved = 0;
+    if (detach) {
+        CfxEventNode* prev = ev->head;
+        for (CfxEventNode* n = prev->next; n && nParked < 8; n = prev->next) {
+            HMODULE o = nodeOwner(n);
+            bool hit = false;
+            for (int i = 0; i < nOwners; ++i) if (owners[i] && o == (HMODULE)owners[i]) hit = true;
+            if (hit) {
+#ifdef TEXOVERRIDE_DEV
+                char f[MAX_PATH]=""; GetModuleFileNameA(o,f,MAX_PATH);
+                const char* bs=f; for(const char* q=f;*q;++q) if(*q==92) bs=q+1;
+                LOG_DEV(LogCategory::Core, "cfxDetachOwned: took off order=%d owner=%s", n->order, bs);
+#endif
+                prev->next = n->next; parked[nParked++] = n; ++moved;
+            }
+            else prev = n;
+        }
+    }
+    else {
+        while (nParked > 0) {
+            CfxEventNode* n = parked[--nParked];
+            CfxEventNode** cur = &ev->head->next;
+            while (*cur && n->order >= (*cur)->order) cur = &(*cur)->next;
+            n->next = *cur;
+            *cur = n;
+            ++moved;
+        }
+    }
+    return moved;
+}
+
+#ifdef TEXOVERRIDE_DEV
+void cfxDumpEvent(void* fwEventObject, const char* name)
+{
+    auto* ev = (CfxEvent*)fwEventObject;
+    int i = 0;
+    for (CfxEventNode* n = ev ? ev->head : nullptr; n && i < 64; n = n->next, ++i) {
+        HMODULE m = nodeOwner(n);
+        char full[MAX_PATH] = "?";
+        if (m) GetModuleFileNameA(m, full, MAX_PATH);
+        const char* base = strrchr(full, '/');
+        for (const char* q = full; *q; ++q) if (*q == 92) base = q;   // 92 is the backslash
+        LOG_DEV(LogCategory::Core, "%s[%d] order=%d cookie=%llu handler in %s%s", name, i, n->order,
+                (unsigned long long)n->cookie, base ? base + 1 : full, m == (HMODULE)g_self ? " (OURS)" : "");
+    }
+}
+#endif

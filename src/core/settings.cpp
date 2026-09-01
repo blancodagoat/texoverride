@@ -62,6 +62,17 @@ auto_update = no
 refresh_key = f11
 
 
+# Take FiveM's own writing out of your screenshots.
+#
+# FiveM draws its version in one corner and "N mod packs loaded" in the other,
+# and both end up in every picture you take. List the keys you use to take
+# screenshots and they come off the screen for a moment when you press one, so
+# they are not in the shot.
+#
+#   printscreen, f1 to f12, a single letter or digit, or no
+hide_overlay = no
+
+
 # Never check whether a new version is out.
 # Normally the plugin asks GitHub for the newest version number when it starts.
 # Turning this on stops that, and then it never uses the internet at all.
@@ -92,6 +103,8 @@ int vkFromName(const std::string& raw)
 {
     std::string v = lower(raw);
     if (v.empty() || v == "off" || v == "no" || v == "none" || v == "disabled") return 0;
+    // spelled every way people actually type it, because nobody agrees on where the vowels go
+    if (v == "printscreen" || v == "prntscrn" || v == "prtscn" || v == "prtsc" || v == "print") return VK_SNAPSHOT;
     if (v.size() >= 2 && v[0] == 'f') {
         int n = atoi(v.c_str() + 1);
         if (n >= 1 && n <= 12) return VK_F1 + n - 1;
@@ -176,6 +189,7 @@ void loadSettings()
         else if (k == "no_update_check") g_set.noUpdateCheck = g_set.noUpdateCheck || truthy(v);
         else if (k == "texture_budget" && g_set.budget.empty()) g_set.budget = v;
         else if (k == "refresh_key") g_set.refreshKey = v;
+        else if (k == "hide_overlay") g_set.hideOverlay = v;
     }
     fclose(f);
 }

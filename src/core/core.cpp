@@ -13,6 +13,7 @@
 #include "features/crash_saver.h"
 #include "features/scanner.h"
 #include "features/live_reload.h"
+#include "features/clean_shot.h"
 #include "features/update.h"
 #include "MinHook.h"
 #include <windows.h>
@@ -571,6 +572,7 @@ void Setup()
     if (!g_off) {
         g_framePumpConnected = connectFramePump();
         connectFirstLoad();
+        connectShotGate();
     }
 }
 
