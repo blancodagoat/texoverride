@@ -11,3 +11,9 @@ bool isOverrideExt(const std::string& ln);
 bool isVanillaAnimalYmt(const std::string& key);
 bool isAllowedKey(const std::string& key);
 bool isIgnoredType(const std::string& ln, const std::string& rel, bool announce);
+
+// The streaming key a file registers under, from its path inside tex_overrides (forward
+// slashes, lowercase). The collection is the file's own parent folder; any folders above it
+// are the user's tidiness and mean nothing. Returns "" for a file with no place and sets *why
+// to the message to log.
+std::string slotKeyFor(const std::string& rel, const char** why);

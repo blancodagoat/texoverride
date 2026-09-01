@@ -333,12 +333,13 @@ void rescanTree(const std::string& base, const std::string& sub, bool quiet, std
         if (sub.empty() && ln.size() > 4 && ln.compare(ln.size()-4, 4, ".xml") == 0) { if (!quiet) xmls.push_back(name); continue; }
         if (!isOverrideExt(ln)) continue;
 
-        std::string key = lower(fwd(childRel));
-        if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
-        if (!isAllowedKey(key)) {
-            if (isNew && !quiet) LOG_WARN(LogCategory::Scan, "SKIP %s - folder contents must use GTA ped part naming", key.c_str());
+        const char* why = nullptr;
+        std::string key = slotKeyFor(lower(fwd(childRel)), &why);   // same rule as the startup scan
+        if (key.empty()) {
+            if (isNew && !quiet) LOG_WARN(LogCategory::Scan, "SKIP %s - %s", lower(fwd(childRel)).c_str(), why ? why : "refused");
             continue;
         }
+        if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
 
         EnterCriticalSection(&g_cs);
         uint32_t handle = 0; bool known = false;

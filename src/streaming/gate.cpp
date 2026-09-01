@@ -181,3 +181,37 @@ bool isIgnoredType(const std::string& ln, const std::string& rel, bool announce)
     }
     return false;
 }
+
+// One rule for both the startup scan and live reload, so a nested folder means the same thing
+// on both paths. Flat layouts produce exactly the keys they always did.
+std::string slotKeyFor(const std::string& rel, const char** why)
+{
+    *why = nullptr;
+    size_t cut = rel.rfind('/');
+    std::string file = cut == std::string::npos ? rel : rel.substr(cut + 1);
+    std::string parent;
+    if (cut != std::string::npos) {
+        size_t cut2 = rel.rfind('/', cut - 1);
+        parent = cut2 == std::string::npos ? rel.substr(0, cut) : rel.substr(cut2 + 1, cut - cut2 - 1);
+    }
+    bool slotted = hasExt(file, ".ydd") || hasExt(file, ".ytd");
+    if (slotted && !parent.empty()) {
+        std::string k = parent + "/" + file;
+        if (isAllowedKey(k)) return k;
+        // a ped part in a folder that is not a ped collection: a story ped folder, or a clothing
+        // file dropped one level too high. It has no bare-name meaning, so say what is wrong.
+        if (isBlockedCollection(parent) || isPedComponentFile(file)) {
+            *why = "folder contents must use GTA ped part naming (e.g. head_000_r.ydd, uppr_diff_001_a_uni.ytd), inside a folder named after the collection";
+            return "";
+        }
+        // not a ped part: the folder is just a folder, treat the file as loose (tattoos/ etc.)
+    }
+    if (isAllowedKey(file)) return file;
+    if (hasExt(file, ".ymt") && isVanillaAnimalYmt(file))
+        *why = "vanilla animal .ymt collides with game metadata; other mod files still load";
+    else if (hasExt(file, ".ydd"))
+        *why = "a .ydd belongs in a folder named after its collection (see COLLECTIONS.md); only animal models (a_c_*) can sit loose";
+    else
+        *why = "not a file type the plugin loads";
+    return "";
+}

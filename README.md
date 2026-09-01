@@ -85,6 +85,12 @@ and bring your answers.
 Everything goes in the `tex_overrides` folder. Most files go straight in under their own name.
 Clothes are the exception: they go in a subfolder named after the character they belong to.
 
+You can put your own folders around all of that to keep packs apart. `clothingpack1/mp_f_freemode_01_female_heist/uppr_013_r.ydd`
+loads the same as `mp_f_freemode_01_female_heist/uppr_013_r.ydd`; only the folder the file sits
+in directly has to be the collection name. Weapons, props, animations and tattoo textures can go
+in folders too. If two packs contain the same file, the first one found is used and the log says
+`DUPLICATE` for the other.
+
 | What | Where it goes | File types |
 |------|---------------|------------|
 | Clothes | a subfolder, such as `mp_m_freemode_01/` | `.ydd` `.ytd` |

@@ -10,8 +10,12 @@
 #include <unordered_map>
 
 // The walk itself opens nothing: it only decides which names are ours.
+// One key can only be provided once; two packs shipping the same file keep the first one seen.
+static std::unordered_set<std::string> g_seenKeys;
+
 void walkDir(const std::string& base, const std::string& rel, std::vector<Cand>& out)
 {
+    if (rel.empty()) g_seenKeys.clear();
     std::string pattern = base + rel + "\\*";
     WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -23,15 +27,17 @@ void walkDir(const std::string& base, const std::string& rel, std::vector<Cand>&
         std::string ln = lower(name);
         if (isIgnoredType(ln, fwd(childRel), true)) continue;
         if (!isOverrideExt(ln)) continue;
-        std::string slotStr = lower(fwd(childRel));   // "mp_m_freemode_01/teef_004_u.ydd" or bare "mp_fm_skin_m_up_whi.ytd"
-        // SAFETY GATE: folders must be a freemode or animal ped collection (see isAllowedKey).
-        if (!isAllowedKey(slotStr)) {
-            // a loose-type file inside a folder is the common mistake (a prop pack copied in
-            // whole); say where it goes instead of quoting the ped naming rule at it
-            if (hasExt(ln, ".ydr") || hasExt(ln, ".yft") || hasExt(ln, ".ycd") || hasExt(ln, ".ymt"))
-                LOG_WARN(LogCategory::Scan, "SKIP %s - %s files go straight into tex_overrides, not in a folder", slotStr.c_str(), strrchr(ln.c_str(), '.'));
-            else
-                LOG_WARN(LogCategory::Scan, "SKIP %s - folder contents must use GTA ped part naming (e.g. head_000_r.ydd, uppr_diff_001_a_uni.ytd)", slotStr.c_str());
+        std::string relStr = lower(fwd(childRel));
+        // SAFETY GATE: the key is collection/file or a bare name, whatever folders sit above it
+        // (slotKeyFor). Folders that are not collections are the user's own organisation.
+        const char* why = nullptr;
+        std::string slotStr = slotKeyFor(relStr, &why);
+        if (slotStr.empty()) {
+            LOG_WARN(LogCategory::Scan, "SKIP %s - %s", relStr.c_str(), why ? why : "refused");
+            continue;
+        }
+        if (!g_seenKeys.insert(slotStr).second) {
+            LOG_WARN(LogCategory::Scan, "DUPLICATE %s - %s provides the same file as one already listed; this copy is ignored", slotStr.c_str(), relStr.c_str());
             continue;
         }
         if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly

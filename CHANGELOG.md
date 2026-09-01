@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.17 (2026-09-02)
+
+- You can now keep your files in folders of your own inside `tex_overrides`. Put
+  `clothingpack1/mp_f_freemode_01_female_heist/uppr_013_r.ydd` and it loads exactly as if the
+  `clothingpack1` folder were not there. The rule: a clothing file's collection is the folder it
+  sits in directly, and any folders above that are yours to name. Weapons, props, animations
+  and tattoo textures can go in folders too; they still load by their own file name. The flat
+  layout keeps working unchanged, so nothing has to move.
+  If two packs ship the same file, the first one found wins and the log says which copy was
+  skipped (`DUPLICATE`). Files the plugin cannot place now get a `SKIP` line that says why.
+
 ## 0.8.16 (2026-09-01)
 
 - New `hide_overlay` setting keeps FiveM's version text and mod pack counter out of your
