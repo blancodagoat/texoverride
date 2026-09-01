@@ -19,10 +19,10 @@
 // server ships) sits on the same list, and a screenshot with the server's UI missing is not
 // what anyone asked for. No code is patched anywhere; two list pointers move and move back.
 //
-// The gate is only ever shut for the moment of a screenshot, and there is deliberately no way to
-// shut it for good. This is not about removing FiveM's branding, which is theirs and which every
-// player sees the whole time they play; it is about it not being in the picture afterwards. Any
-// "leave it off" option would be the other thing wearing this one's name, so it does not exist.
+// Two modes. A list of keys shuts the gate for a second and a half around a screenshot;
+// `always` shuts it for the whole session (0.8.18; 0.8.16 shipped without it and said there
+// would never be one, which is reversed here on purpose and said so in the notes). Either way
+// this is the player's own screen only: the server and other players never see any of it.
 //
 // How the key is seen: the frame pump polls GetAsyncKeyState, the same way the refresh key does.
 // A low-level keyboard hook was tried first (2026-09-01) and, with the game window in front, it
@@ -64,6 +64,7 @@ void shotKeyTick()
     if (g_keys.empty()) return;
     if (held.size() != g_keys.size()) held.assign(g_keys.size(), 0);
     for (size_t i = 0; i < g_keys.size(); ++i) {
+        if (g_keys[i] == 0) continue;   // the "always" placeholder
         bool down = (GetAsyncKeyState(g_keys[i]) & 0x8000) != 0;
         if (down && !held[i]) {
             DWORD pid = 0;
@@ -91,6 +92,7 @@ void connectShotGate()
         while (!t.empty() && t.back()  == ' ') t.pop_back();
         a = b + 1;
         if (t.empty()) continue;
+        if (t == "always") { InterlockedExchange64(&g_hideUntil, 0x7FFFFFFFFFFFFFFFLL); g_keys.push_back(0); continue; }   // 0 = placeholder, never polled
         int vk = vkFromName(t);
         if (vk > 0) g_keys.push_back(vk);
         else if (vk < 0)
@@ -106,6 +108,9 @@ void connectShotGate()
         g_keys.clear();
         return;
     }
-    LOG_INFO(LogCategory::Core, "hide_overlay: FiveM's version watermark and mod pack counter come off the screen for a moment when you press your screenshot key (%d key(s) watched)",
-             (int)g_keys.size());
+    if (g_keys.size() == 1 && g_keys[0] == 0)
+        LOG_INFO(LogCategory::Core, "hide_overlay: FiveM's version watermark and mod pack counter stay off your screen this session (always)");
+    else
+        LOG_INFO(LogCategory::Core, "hide_overlay: FiveM's version watermark and mod pack counter come off the screen for a moment when you press your screenshot key (%d key(s) watched)",
+                 (int)g_keys.size());
 }

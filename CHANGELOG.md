@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.18 (2026-09-02)
+
+- `hide_overlay = always` keeps FiveM's version text and mod pack counter off your screen for
+  the whole session, not only around a screenshot. The 0.8.16 notes said there would never be
+  such a setting. That is reversed here, on purpose, and said out loud rather than slipped in.
+  What has not changed: this is your own screen only. The server sees nothing, other players
+  see nothing, and the plugin still writes into no code of FiveM's or the game's. The key list
+  works as before if you would rather keep the text and only lose it in pictures.
+
 ## 0.8.17 (2026-09-02)
 
 - You can now keep your files in folders of your own inside `tex_overrides`. Put

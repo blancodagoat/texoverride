@@ -154,8 +154,8 @@ moment after the keypress. ShareX, Steam, Medal and the like all do, and come ou
 own PrintScreen (copy to clipboard) grabs the screen in the same instant as the key and may still
 show the text.
 
-There is no setting to hide the text all the time, and there will not be one. It is FiveM's
-branding, and the plugin does not remove it. It only keeps it out of your pictures.
+To keep the text off the whole time you play, use `hide_overlay = always` instead of a key
+list. Either way it is only your own screen: the server and other players see nothing different.
 
 ## Update check
 
@@ -211,7 +211,7 @@ notes and the plugin skips them.
 | `auto_update` | Installs new versions without asking |
 | `no_update_check` | Never checks whether a new version is out |
 | `refresh_key` | Which key reads the folder again, `f1` to `f12`, a letter, a digit, or `off` |
-| `hide_overlay` | Keys that take FiveM's corner text off the screen for a moment: `printscreen`, `f1` to `f12`, a letter, or a digit |
+| `hide_overlay` | Keys that take FiveM's corner text off the screen for a moment (`printscreen`, `f1` to `f12`, a letter, a digit), or `always` |
 
 `yes`, `on`, `true` and `1` all mean on. Anything else means off. Capital letters do not matter.
 

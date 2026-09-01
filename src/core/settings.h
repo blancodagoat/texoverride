@@ -20,7 +20,7 @@ struct Settings
     // Default lives here rather than only in the file text, so the installs that already have a
     // _settings.txt (which is never rewritten) get the key without having to add a line.
     std::string refreshKey = "f11";
-    std::string hideOverlay;   // comma separated screenshot keys; empty = leave FiveM's overlays alone
+    std::string hideOverlay;   // comma separated screenshot keys, or "always"; empty = leave FiveM's overlays alone
 };
 
 extern Settings g_set;

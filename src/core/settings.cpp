@@ -70,6 +70,7 @@ refresh_key = f11
 # they are not in the shot.
 #
 #   printscreen, f1 to f12, a single letter or digit, or no
+#   always keeps them off the screen the whole time you play
 hide_overlay = no
 
 
