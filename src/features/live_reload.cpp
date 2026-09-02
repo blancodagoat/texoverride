@@ -318,7 +318,10 @@ void rescanTree(const std::string& base, const std::string& sub, bool quiet, std
         std::string name = fd.cFileName;
         if (name == "." || name == "..") continue;
         std::string childRel = sub.empty() ? name : sub + "\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { rescanTree(base, childRel, quiet, xmls, batch); continue; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (isDisabledFolder(name)) continue;   // startup logged it; a rename back makes its files new and they load
+            rescanTree(base, childRel, quiet, xmls, batch); continue;
+        }
 
         std::string full = base + childRel;
         Snap now{ ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime,

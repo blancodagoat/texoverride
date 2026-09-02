@@ -91,6 +91,10 @@ in directly has to be the collection name. Weapons, props, animations and tattoo
 in folders too. If two packs contain the same file, the first one found is used and the log says
 `DUPLICATE` for the other.
 
+To switch a pack off without deleting it, put `disabled` at the front of its folder name:
+`disabledPack1` is skipped whole, `Pack2` next to it still loads. Rename it back to turn it on
+again. Files already showing in game stay until you restart, so restart FiveM after renaming.
+
 | What | Where it goes | File types |
 |------|---------------|------------|
 | Clothes | a subfolder, such as `mp_m_freemode_01/` | `.ydd` `.ytd` |

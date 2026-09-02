@@ -23,7 +23,10 @@ void walkDir(const std::string& base, const std::string& rel, std::vector<Cand>&
         std::string name = fd.cFileName;
         if (name == "." || name == "..") continue;
         std::string childRel = rel.empty() ? name : rel + "\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { walkDir(base, childRel, out); continue; }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (isDisabledFolder(name)) { LOG_INFO(LogCategory::Scan, "DISABLED %s - folder skipped; rename it without the disabled prefix to load it", fwd(childRel).c_str()); continue; }
+            walkDir(base, childRel, out); continue;
+        }
         std::string ln = lower(name);
         if (isIgnoredType(ln, fwd(childRel), true)) continue;
         if (!isOverrideExt(ln)) continue;

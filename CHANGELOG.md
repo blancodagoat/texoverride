@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.19 (2026-09-02)
+
+- A folder whose name starts with `disabled` is skipped, with everything inside it. Rename
+  `Pack1` to `disabledPack1` and it stops loading; rename it back and it loads again. That is
+  the whole feature: swap between packs by renaming folders, no deleting or moving files. The
+  log says `DISABLED` and the folder name at startup so you can see it was skipped on purpose.
+  Renaming mid-session works for turning a pack on. Turning one off needs a restart, because
+  files already handed to the game stay there until FiveM closes. Suggested by a user.
+
 ## 0.8.18 (2026-09-02)
 
 - `hide_overlay = always` keeps FiveM's version text and mod pack counter off your screen for

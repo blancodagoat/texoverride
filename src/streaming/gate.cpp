@@ -182,6 +182,14 @@ bool isIgnoredType(const std::string& ln, const std::string& rel, bool announce)
     return false;
 }
 
+// A folder whose name starts with "disabled" is skipped whole, files and subfolders alike, so a
+// pack is switched off by renaming it (Pack1 -> disabledPack1) and back on by renaming it again.
+// No real collection is named that way, so nothing legitimate is lost to the rule.
+bool isDisabledFolder(const std::string& name)
+{
+    return lower(name).rfind("disabled", 0) == 0;
+}
+
 // One rule for both the startup scan and live reload, so a nested folder means the same thing
 // on both paths. Flat layouts produce exactly the keys they always did.
 std::string slotKeyFor(const std::string& rel, const char** why)
