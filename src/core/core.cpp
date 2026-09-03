@@ -366,6 +366,7 @@ static void connectFirstLoad()
 DWORD WINAPI BeatLoop(LPVOID)
 {
     int beatOurs = 0, beatTheirs = 0, beatLoaded = 0;   // ours / re-taken / resident right now
+    long moved = 0;                                    // slots whose name moved to another id
     long watchWait = 0;                                // ticks spent waiting for a start signal
     long heavyInMemory = 0;
     long prevReclaims = 0, prevRedirects = 0, prevLateBinds = 0;
@@ -436,6 +437,28 @@ DWORD WINAPI BeatLoop(LPVOID)
                                 LOG_WARN(LogCategory::Audit, "  HEAVY IN MEMORY: %s really costs %.1f MB loaded (shrink it to fight texture loss)", ov.slot, mem / 1048576.0);
                         }
                         if (e.handle == ov.handle) { ++beatOurs; continue; }
+                        // Somebody else wrote this slot. Before writing back, check the slot still
+                        // carries OUR name. FiveM frees a slot the server created once its resource
+                        // is gone (CfxCollection_RemoveStreamingTag sets handle 0, the unload before
+                        // a reconnect calls RemoveSlot), and the store hands that index to the next
+                        // file registered. Our handle written into it would point a stranger's
+                        // asset at our file. Only the index the NAME resolves to can be freed that
+                        // way: the extra index the claim minted in the aliased case never resolves
+                        // by name and is never freed, so it is exempt. A lookup that fails for a
+                        // reason other than "unknown name" says nothing about the slot; skip the
+                        // beat rather than guess.
+                        int why = SLOT_OK;
+                        uint32_t byName = targetStreamingId(ov.slot, &why);
+                        bool phantom = (which == ov.id && ov.altId != 0xFFFFFFFF);
+                        if (!phantom && byName != which) {
+                            if (why != SLOT_OK && why != SLOT_NO_NAME) continue;
+                            uint32_t& ref = (which == ov.altId) ? ov.altId : ov.id;
+                            ref = validStreamingId(byName) ? byName : 0xFFFFFFFF;
+                            if (++moved <= 60)
+                                LOG_INFO(LogCategory::Claim, "MOVED: %s no longer lives at id=%u (handle there %08x); %s", ov.slot, which, e.handle,
+                                         ref == 0xFFFFFFFF ? "name unknown, waiting for it to come back" : "following the name to its new id");
+                            continue;
+                        }
                         ++beatTheirs;
                         if ((e.flags & 3) >= 2) { ++g_deferred; continue; }   // being requested/loaded right now; retry next tick
                         uint32_t old = e.handle;

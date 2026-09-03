@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.20 (2026-09-03)
+
+- The re-assert loop checks that a slot still carries the file's name before writing its handle
+  back. FiveM frees a slot the server created once that resource is gone, and after a reconnect
+  the same index can belong to a different file. Writing into it then pointed a stranger's asset
+  at one of your files, and the game read a shirt where it wanted a lamp. It only affected files
+  the server streamed first and the plugin took over later (`LATE-BIND`, live reload, occupied-slot
+  takeover), and only after a disconnect and reconnect in the same session. The lookup by name
+  happens only when something else has written the slot, so the ordinary beat costs nothing
+  extra. When the name has moved the plugin follows it and the log says `MOVED`; when the name is
+  gone it waits for it to come back, the way `LATE-BIND` already does.
+
 ## 0.8.19 (2026-09-02)
 
 - A folder whose name starts with `disabled` is skipped, with everything inside it. Rename

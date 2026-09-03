@@ -45,6 +45,7 @@ It adds internal detail that is only useful when someone is helping you work out
 | `OVERRIDE-FAILED: slot <- file` | Registration failed and produced no usable entry |
 | `LATE-BIND: slot ...` | A previously missing target appeared and was attached |
 | `RECLAIM: slot (old -> ours)` | The game tried to take an item back; the plugin re-took it |
+| `MOVED: slot no longer lives at id=...` | The game freed that slot and reused the index; the plugin follows the name instead of writing into it |
 | `REDIRECT name -> file` | A server file was swapped for yours |
 | `PLACEMENT: ...` | A tattoo position change was applied |
 | `LIVE-ADD` / `LIVE-TAKEOVER` / `LIVE-UPDATE` | A file you changed while playing was picked up |
