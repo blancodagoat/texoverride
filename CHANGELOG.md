@@ -2,14 +2,16 @@
 
 ## 0.8.21 (2026-09-03)
 
-- `hide_overlay` no longer stops FiveM from drawing its own text. The handler the setting takes
-  off the screen draws the version watermark, but it is also the one place FiveM flushes every
-  piece of text its other parts queue up, and the place its text memory is recycled. With the
-  handler parked, that text (the red reconnect warning, for one) never appeared and the queue
-  only ever grew. The plugin now makes that flush call itself for as long as the overlays are
-  hidden, the same call FiveM makes from another handler of its own. Reported alongside a DUI
-  screen that drew only half its picture with `always` set; if that was this, it is fixed, and
-  if you still see it with `hide_overlay = no` please say so.
+- `hide_overlay = always` no longer cuts DUI screens in half. A player found that with the
+  setting on, a DUI television drew only one triangle of its screen, and drew normally with the
+  setting off. The handler the setting takes off the screen draws FiveM's version watermark, and
+  in a stock FiveM that is the last draw of every frame. Taking it away left the frame ending in
+  a different state, and the next frame's screen quad lost a triangle to it. The plugin now puts
+  a handler of its own in that exact spot. It draws nothing you can see: a zero-size triangle,
+  which is the same trick FiveM itself uses to settle its drawing state before each frame.
+- The same handler is also the one place FiveM draws the text its other parts queue up, and the
+  place its text memory is recycled. With it parked, that text (the red reconnect warning, for
+  one) never appeared and the queue only ever grew. The stand-in makes that call too.
 
 ## 0.8.20 (2026-09-03)
 

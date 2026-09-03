@@ -39,26 +39,52 @@ static void*   g_shotEvent = nullptr;
 static void*   g_owners[2] = {};          // the two DLLs whose handlers come off the event
 static bool    g_hidden = false;          // render thread only
 static void*   g_theFonts = nullptr;      // font-renderer!TheFonts, a FontRenderer**
+static void*   g_standIns[2] = {};        // our node that sits where font-renderer's was
 
-// font-renderer's node does two jobs, not one. After queueing the watermark it calls
-// TheFonts->DrawPerFrame() (GtaGameInterface.cpp, order 1000), and that call is the ONLY place
-// FiveM ever draws the text every other component queued through TheFonts, and the only place
-// its 8 MB text arena swaps pages. With the node parked, text queued by anything else (the
-// red reconnect warning in BindNetLibrary.cpp, for one) never appears and the arena never
-// resets. So while the node is off, we make that call from here, once a frame. Cfx does the
-// same thing from a foreign handler in NuiLoadWarning.cpp. DrawPerFrame is slot 3 of
-// FontRenderer's vtable (Initialize, DrawText, DrawRectangle, DrawPerFrame, GetStringMetrics;
-// font-renderer/include/FontRenderer.h), and the slot has to point into font-renderer.dll or
-// nothing is called. Not SEH-wrapped on purpose: a call into Cfx code fails at the call site.
-static void flushFonts()
+// rage-graphics-five's im-mode draw path, the same five calls font-renderer's own draw makes.
+static void     (*g_imPush)()  = nullptr;
+static void     (*g_imPop)()   = nullptr;
+static void     (*g_imBegin)(int, int) = nullptr;
+static void     (*g_imVertex)(float, float, float, float, float, float, uint32_t, float, float) = nullptr;
+static void     (*g_imEnd)()   = nullptr;
+
+// ---- Why the watermark handler cannot simply be removed (0.8.21, a field report) ----
+// In a stock FiveM, font-renderer's handler is the LAST thing to draw in every frame: it queues
+// the watermark and then calls TheFonts->DrawPerFrame(), which draws the queue with the game's
+// im-mode path (GtaGameInterface.cpp, order 1000). 0.8.18's `always` took that handler off and
+// put nothing in its place, and a player's DUI television then drew exactly one triangle of its
+// two-triangle screen, whole again the moment hide_overlay was set to no. Every other draw in
+// that frame is identical between the two settings, so the one difference is that the frame no
+// longer ends with an im draw. Cfx itself issues a degenerate three-vertex draw before firing
+// this event "to flush other grcore states" (RenderHooks.cpp), and that is what the stand-in
+// below does at the parked handler's exact position: zero area, no pixels, same state walk.
+//
+// The same handler is also the ONLY place FiveM draws the text every other component queues
+// through TheFonts (the red reconnect warning in BindNetLibrary.cpp, for one) and the only
+// caller of its text arena's page swap (FontRendererAllocator.cpp), so DrawPerFrame is called
+// here as well; Cfx calls it from a foreign handler in NuiLoadWarning.cpp too. DrawPerFrame is
+// slot 3 of FontRenderer's vtable (Initialize, DrawText, DrawRectangle, DrawPerFrame,
+// GetStringMetrics; font-renderer/include/FontRenderer.h), and the slot has to point into
+// font-renderer.dll or nothing is called. Not SEH-wrapped on purpose: a call into Cfx code
+// fails at the call site, not minutes later looking like somebody else's bug.
+static bool standInForWatermark()
 {
     void* obj = g_theFonts ? *(void**)g_theFonts : nullptr;
-    if (!obj) return;
-    void** vt = *(void***)obj;
-    HMODULE m = nullptr;
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[3], &m)
-        || !m || m != (HMODULE)g_owners[1]) return;
-    ((void(__fastcall*)(void*))vt[3])(obj);
+    if (obj) {
+        void** vt = *(void***)obj;
+        HMODULE m = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)vt[3], &m)
+            && m && m == (HMODULE)g_owners[1])
+            ((void(__fastcall*)(void*))vt[3])(obj);
+    }
+    if (g_imPush && g_imPop && g_imBegin && g_imVertex && g_imEnd) {
+        g_imPush();
+        g_imBegin(3, 3);   // 3 = triangle list, the type font-renderer's glyph draw uses
+        for (int i = 0; i < 3; ++i) g_imVertex(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0u, 0.0f, 0.0f);
+        g_imEnd();
+        g_imPop();
+    }
+    return true;
 }
 
 // Render thread, once per frame, from our own node on the event. It is the only thread that
@@ -68,13 +94,12 @@ static bool overlayGate()
     bool hide = (LONG64)GetTickCount64() < InterlockedCompareExchange64(&g_hideUntil, 0, 0);
     if (hide != g_hidden) {
         g_hidden = hide;
-        int n = cfxDetachOwned(g_shotEvent, g_owners, 2, hide);
+        int n = cfxDetachOwned(g_shotEvent, g_owners, g_standIns, 2, hide);
         LOG_DEV(LogCategory::Core, "hide_overlay: %d handler(s) %s the event", n, hide ? "taken off" : "put back on");
 #ifdef TEXOVERRIDE_DEV
         if (hide) cfxDumpEvent(g_shotEvent, "after-detach");
 #endif
     }
-    if (hide) flushFonts();   // the parked node's other job, see above
     return true;   // never stops the chain
 }
 
@@ -127,11 +152,19 @@ void connectShotGate()
     g_owners[1] = GetModuleHandleA("font-renderer.dll");
     g_theFonts  = cfxSymbol("font-renderer.dll", "?TheFonts@@3PEAVFontRenderer@@EA");
     g_shotEvent = cfxSymbol("rage-graphics-five.dll", "?OnPostFrontendRender@@3V?$fwEvent@$$V@@A");
+    g_imPush   = (decltype(g_imPush))  cfxSymbol("rage-graphics-five.dll", "?PushDrawBlitImShader@@YAXXZ");
+    g_imPop    = (decltype(g_imPop))   cfxSymbol("rage-graphics-five.dll", "?PopDrawBlitImShader@@YAXXZ");
+    g_imBegin  = (decltype(g_imBegin)) cfxSymbol("rage-graphics-five.dll", "?grcBegin@rage@@YAXHH@Z");
+    g_imVertex = (decltype(g_imVertex))cfxSymbol("rage-graphics-five.dll", "?grcVertex@rage@@YAXMMMMMMIMM@Z");
+    g_imEnd    = (decltype(g_imEnd))   cfxSymbol("rage-graphics-five.dll", "?grcEnd@rage@@YAXXZ");
+    g_standIns[1] = cfxMakeNode(g_shotEvent, [] { return standInForWatermark(); }, 1000);
     if (!g_shotEvent || (!g_owners[0] && !g_owners[1]) || !cfxConnect(g_shotEvent, [] { return overlayGate(); })) {
         LOG_WARN(LogCategory::Core, "hide_overlay: this FiveM does not offer the drawing event, so its overlays cannot be hidden");
         g_keys.clear();
         return;
     }
+    if (!g_imPush || !g_imPop || !g_imBegin || !g_imVertex || !g_imEnd)
+        LOG_WARN(LogCategory::Core, "hide_overlay: this FiveM does not export its im-mode draw path, so the frame-end draw is skipped (DUI screens may draw half)");
     if (g_keys.size() == 1 && g_keys[0] == 0)
         LOG_INFO(LogCategory::Core, "hide_overlay: FiveM's version watermark and mod pack counter stay off your screen this session (always)");
     else

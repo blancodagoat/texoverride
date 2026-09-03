@@ -59,15 +59,21 @@ struct CfxEvent
     volatile LONG64 nextCookie;
 };
 
+void* cfxMakeNode(void* fwEventObject, std::function<bool()> fn, int order)
+{
+    if (!fwEventObject) return nullptr;
+    auto* ev = (CfxEvent*)fwEventObject;
+    void* mem = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CfxEventNode));
+    if (!mem) return nullptr;
+    return new (mem) CfxEventNode{ std::move(fn), nullptr, order, 0,
+                                   (size_t)InterlockedIncrement64(&ev->nextCookie) };
+}
+
 bool cfxConnect(void* fwEventObject, std::function<bool()> fn)
 {
-    if (!fwEventObject) return false;
     auto* ev = (CfxEvent*)fwEventObject;
-
-    void* mem = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CfxEventNode));
-    if (!mem) return false;
-    auto* node = new (mem) CfxEventNode{ std::move(fn), nullptr, 0, 0,
-                                         (size_t)InterlockedIncrement64(&ev->nextCookie) };
+    auto* node = (CfxEventNode*)cfxMakeNode(fwEventObject, std::move(fn), 0);
+    if (!node) return false;
 
     // Prepend with one atomic write, never Cfx's ordered walk. Cfx's own Connect takes no lock
     // and splices with plain stores, so if we walk and store too, a component connecting at the
@@ -108,10 +114,12 @@ static HMODULE nodeOwner(CfxEventNode* n)
 // node. Nothing is freed or copied: a parked node keeps its own `next`, and going back it is
 // inserted by Cfx's own rule (after every node whose order is <= its own), starting past the
 // head, so a node Cfx added meanwhile is safe and ours stays in front. The head is never moved.
-int cfxDetachOwned(void* fwEventObject, void** owners, int nOwners, bool detach)
+int cfxDetachOwned(void* fwEventObject, void** owners, void** standIns, int nOwners, bool detach)
 {
     static CfxEventNode* parked[8];
     static int nParked = 0;
+    static CfxEventNode* placed[8];   // stand-ins currently on the list
+    static int nPlaced = 0;
     auto* ev = (CfxEvent*)fwEventObject;
     if (!ev || !ev->head) return 0;
     int moved = 0;
@@ -119,20 +127,35 @@ int cfxDetachOwned(void* fwEventObject, void** owners, int nOwners, bool detach)
         CfxEventNode* prev = ev->head;
         for (CfxEventNode* n = prev->next; n && nParked < 8; n = prev->next) {
             HMODULE o = nodeOwner(n);
-            bool hit = false;
-            for (int i = 0; i < nOwners; ++i) if (owners[i] && o == (HMODULE)owners[i]) hit = true;
-            if (hit) {
+            int hit = -1;
+            for (int i = 0; i < nOwners; ++i) if (owners[i] && o == (HMODULE)owners[i]) hit = i;
+            if (hit >= 0) {
 #ifdef TEXOVERRIDE_DEV
                 char f[MAX_PATH]=""; GetModuleFileNameA(o,f,MAX_PATH);
                 const char* bs=f; for(const char* q=f;*q;++q) if(*q==92) bs=q+1;
                 LOG_DEV(LogCategory::Core, "cfxDetachOwned: took off order=%d owner=%s", n->order, bs);
 #endif
-                prev->next = n->next; parked[nParked++] = n; ++moved;
+                parked[nParked++] = n; ++moved;
+                auto* sub = (CfxEventNode*)(standIns ? standIns[hit] : nullptr);
+                bool fresh = sub != nullptr;
+                for (int i = 0; i < nPlaced; ++i) if (placed[i] == sub) fresh = false;
+                if (fresh && nPlaced < 8) {
+                    // Same spot, same order: the stand-in's `next` is published before the
+                    // pointer to it, so the walker sees either the old node or the whole new one.
+                    sub->next = n->next; sub->order = n->order;
+                    prev->next = sub; placed[nPlaced++] = sub; prev = sub;
+                }
+                else prev->next = n->next;
             }
             else prev = n;
         }
     }
     else {
+        while (nPlaced > 0) {
+            CfxEventNode* sub = placed[--nPlaced];
+            for (CfxEventNode* p = ev->head; p && p->next; p = p->next)
+                if (p->next == sub) { p->next = sub->next; break; }
+        }
         while (nParked > 0) {
             CfxEventNode* n = parked[--nParked];
             CfxEventNode** cur = &ev->head->next;
