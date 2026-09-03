@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.21 (2026-09-03)
+
+- `hide_overlay` no longer stops FiveM from drawing its own text. The handler the setting takes
+  off the screen draws the version watermark, but it is also the one place FiveM flushes every
+  piece of text its other parts queue up, and the place its text memory is recycled. With the
+  handler parked, that text (the red reconnect warning, for one) never appeared and the queue
+  only ever grew. The plugin now makes that flush call itself for as long as the overlays are
+  hidden, the same call FiveM makes from another handler of its own. Reported alongside a DUI
+  screen that drew only half its picture with `always` set; if that was this, it is fixed, and
+  if you still see it with `hide_overlay = no` please say so.
+
 ## 0.8.20 (2026-09-03)
 
 - The re-assert loop checks that a slot still carries the file's name before writing its handle
