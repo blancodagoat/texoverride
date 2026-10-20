@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.8.29 (2026-10-20)
+
+- Fixes Windows accounts whose name uses letters outside Windows' "language for non-Unicode
+  programs" setting, like a Russian name on an English Windows. On those the plugin could not
+  even find its own folder. Every path inside the plugin is now kept in a form that holds any
+  alphabet, and Windows is always asked for files that way.
+- Fixes the same kind of bug in a second place. When a server streamed a file you had replaced,
+  the plugin handed the game an old-style path. On an account name with letters like ö or ç the
+  swap did nothing, while the log still said `REDIRECT`.
+- The crash saver now covers files you add while playing. If the game crashed within 30 seconds
+  of a live add, FiveM's own shutdown could delete the note naming that file, so the next launch
+  loaded it again and crashed again. Now that file is set aside. The catch: quitting the game
+  within 30 seconds of adding a file sets it aside once too, and the log says how to undo it.
+- A file added while playing is now registered exactly like one that was there at startup,
+  including the check for names the game already owns. Before, those could land in a slot
+  nothing reads.
+- A crash inside the game's own registration while adding a file live is no longer hidden. It
+  used to be caught, which left the game's file list half updated. The game then died minutes
+  later, looking like somebody else's fault.
+- When the plugin cannot find the game function it hooks, it now really switches itself off, as
+  the log line already said. Before, parts of it kept running.
+- Tattoo placement re-checks the size of the game's list every second. A list that shrinks after
+  a pack reloads can no longer be written past its end.
+- The texture budget is never lowered. If you raise the graphics slider during a session, the
+  plugin leaves FiveM's higher number alone instead of writing its own smaller one back every
+  second.
+- A typo in `texture_budget` now gets a warning in the log instead of quietly turning the raise
+  off.
+- The updater only downloads over https, and a download that gets cut off counts as a failure
+  instead of a finished file.
+- The updater also looked for the download link starting a little before the plugin's entry in
+  GitHub's answer. That was close enough to the .zip's link that it could have fetched the wrong
+  file. It now reads only the plugin's own entry.
+- Startup is lighter on big packs. The crash saver's note is written through one open file
+  instead of being opened and closed once per file, and every close meant another antivirus scan.
+- A folder link that points back up the tree no longer sends the scan round forever. It stops 16
+  folders deep.
+- Log lines renamed: `Occupied-slot exports` is now `Slot lookup exports` and
+  `Live reload exports`. The "non-English characters" line is gone, since there is only one kind
+  of path now.
+- For anyone building it: the code is reorganised so each part keeps its own data to itself, and
+  live reload and startup share one claim function. `build.bat dev` replaces `builddev.bat`.
+- The build server now checks that the version number matches everywhere it is written. It also
+  runs new tests for the update check, the file size reader, the tattoo file reader, and a folder
+  named in two alphabets.
+
 ## 0.8.28 (2026-09-13)
 
 - The plugin no longer looks up the Windows functions for listing and freezing threads. The

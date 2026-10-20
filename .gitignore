@@ -1,10 +1,14 @@
-# build artifacts (attach the built .asi to a GitHub Release instead of committing it)
+﻿# build artifacts (attach the built .asi to a GitHub Release instead of committing it)
 *.asi
 *.obj
 *.res
 *.exp
 *.lib
 *.log
+
+# compilation database / editor artifacts
+compile_commands.json
+compile_flags.txt
 
 # working files kept in the project folder on purpose (user preference: scratchpads live with
 # the project, not in %TEMP%). Multi-GB extracted game assets, throwaway tools, downloaded logs.

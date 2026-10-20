@@ -2,11 +2,11 @@
 #include "core/state.h"
 #include "core/logger.h"
 #include "core/pattern.h"
+#include "core/utils.h"
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
-#include <cctype>
 
 // ============================ tattoo placement (overlays.xml) ============================
 // Tattoo POSITION lives in per-DLC overlays.xml files, loaded through the DLC content pipeline —
@@ -29,16 +29,15 @@
 // mostly-stock values. A file with one preset, or with every value edited, works as long as some
 // other file in tex_overrides fingerprinted first.
 
-uint32_t joaat(const char* s, size_t n)   // GTA's case-insensitive hash
-{
-    uint32_t h = 0;
-    for (size_t i = 0; i < n; ++i) { h += (uint8_t)tolower((unsigned char)s[i]); h += h << 10; h ^= h >> 6; }
-    h += h << 3; h ^= h >> 11; h += h << 15; return h;
-}
+static std::vector<PlColl> g_pl;          // under g_cs: the watcher swaps entries, the beat applies them
+static uint8_t** g_decorMgr = nullptr;
+static int32_t   g_decorCollOff = -1;
+static bool g_plLocated = false;
+static volatile LONG g_plFault = 0;
 
 void parsePlacementXml(const std::string& path, const char* fname, std::vector<PlColl>& out)
 {
-    FILE* f; if (fopen_s(&f, path.c_str(), "rb") != 0 || !f) return;
+    FILE* f = openFile(path, "rb"); if (!f) return;
     std::string x; fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     if (n > 0) { x.resize((size_t)n); x.resize(fread(&x[0], 1, (size_t)n, f)); } fclose(f);
 
@@ -78,12 +77,12 @@ void parsePlacementXml(const std::string& path, const char* fname, std::vector<P
     out.push_back(std::move(pc));
 }
 
-void placementLocate()
+static void placementLocate()
 {
     // Cfx's own pattern for the tattoo-sort call site (PatchTattooSort.cpp); the comparator it
     // points at loads ms_instance and the collections-array offset.
     const short PAT[] = { 0x41,0x0F,0xB7,0xDE,0x4C,0x8D,0x0D,-1,-1,-1,-1,0x41,0xB8 };
-    uint8_t* p = scanModule(PAT, 13);
+    uint8_t* p = scanModule(PAT);
     if (!p) { LOG_WARN(LogCategory::Tattoo, "PedDecorationManager pattern NOT FOUND — placement files inert"); return; }
     uint8_t* comparator = ripTarget(p + 7);
     g_decorMgr = (uint8_t**)ripTarget(comparator + 3);
@@ -110,7 +109,7 @@ static bool layoutFits(const PlColl& pc, uint8_t* coll)
     return true;
 }
 
-bool placementSolveImpl(PlColl& pc, uint8_t* coll)
+static bool placementSolveImpl(PlColl& pc, uint8_t* coll)
 {
     const size_t N = pc.presets.size();
 
@@ -173,7 +172,7 @@ bool placementSolveImpl(PlColl& pc, uint8_t* coll)
 // at freed memory. A fault here must retire only THIS collection, not the whole feature — the
 // outer SEH in placementBeatSafe stays as the last line of defense for the apply path.
 // (POD locals only, so __try is legal in this frame.)
-bool placementSolve(PlColl& pc, uint8_t* coll)
+static bool placementSolve(PlColl& pc, uint8_t* coll)
 {
     __try { return placementSolveImpl(pc, coll); }
     __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -183,7 +182,7 @@ bool placementSolve(PlColl& pc, uint8_t* coll)
     }
 }
 
-void placementBeat()
+static void placementBeat()
 {
     if (!g_plLocated) { placementLocate(); g_plLocated = true; }
     if (!g_decorMgr) return;
@@ -202,7 +201,10 @@ void placementBeat()
         if (!pc.solved && !placementSolve(pc, coll)) continue;
 
         uint8_t* P = *(uint8_t**)(coll + pc.arrOff);
-        if ((uintptr_t)P < 0x10000 || *(uint32_t*)(P + pc.nameOff) != pc.presets[0].hash) { pc.solved = false; continue; }
+        // The count too, every beat: a collection rebuilt with fewer presets but the same first
+        // one would otherwise take writes past the end of its array, which no SEH can catch.
+        if ((uintptr_t)P < 0x10000 || *(uint16_t*)(coll + pc.arrOff + 8) != (uint16_t)pc.presets.size()
+            || *(uint32_t*)(P + pc.nameOff) != pc.presets[0].hash) { pc.solved = false; continue; }
         for (size_t i = 0; i < pc.presets.size(); ++i) {
             float* q = (float*)(P + i * pc.stride + pc.uvOff);
             for (int k = 0; k < 5; ++k) {
@@ -228,7 +230,7 @@ void placementBeatSafe()
 
 void mergePlacement(std::vector<PlColl>& fresh)
 {
-    EnterCriticalSection(&g_cs);
+    CsLock lk(g_cs);
     for (auto& npc : fresh) {
         PlColl* old = nullptr;
         for (auto& pc : g_pl) if (pc.src == npc.src) { old = &pc; break; }
@@ -247,17 +249,19 @@ void mergePlacement(std::vector<PlColl>& fresh)
                  npc.presets.size(), npc.solved ? ", layout kept" : "");
         if (old) *old = std::move(npc); else g_pl.push_back(std::move(npc));
     }
-    LeaveCriticalSection(&g_cs);
     if (g_plFault) LOG_WARN(LogCategory::Tattoo, "Placement: NOTE — placement is disabled for this session (earlier fault), edits will apply after a restart");
 }
 
 void loadPlacementFiles()
 {
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((std::string(g_overrideDir) + "*.xml").c_str(), &fd);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(widen(std::string(g_overrideDir) + "*.xml").c_str(), &fd);
+    CsLock lk(g_cs);   // the beat reads g_pl under it, and may already be running
     if (h != INVALID_HANDLE_VALUE) {
-        do { parsePlacementXml(std::string(g_overrideDir) + fd.cFileName, fd.cFileName, g_pl); }
-        while (FindNextFileA(h, &fd));
+        do {
+            std::string name = narrow(fd.cFileName);
+            parsePlacementXml(std::string(g_overrideDir) + name, name.c_str(), g_pl);
+        } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
     for (auto& pc : g_pl)

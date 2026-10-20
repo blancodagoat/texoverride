@@ -23,9 +23,30 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # The gate, the settings parser, the revalidation sweep and ctlPath all have plain
-      # assert-style checks in tools/. They only mean anything if they run on every push,
-      # so this gates the build: a red test never reaches a release.
+      # One version, written down in several places: src/core/version.h, the four numbers in
+      # texoverride.rc, the top CHANGELOG heading, and on a release the tag. A file whose version
+      # resource disagrees with what it logs is the first thing a support thread trips over, so
+      # the .rc has to match on every push. The CHANGELOG and the tag are only held to it on a
+      # tag build, because work in progress may already have its next section open.
+      - name: Check version numbers agree
+        shell: bash
+        run: |
+          v=$(grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' src/core/version.h | tr -d '"')
+          c=${v//./,}
+          bad=0
+          grep -qE "^FILEVERSION +$c,0" texoverride.rc    || { echo "texoverride.rc FILEVERSION is not $c,0"; bad=1; }
+          grep -qE "^PRODUCTVERSION +$c,0" texoverride.rc || { echo "texoverride.rc PRODUCTVERSION is not $c,0"; bad=1; }
+          [ "$(grep -c "\"$v.0\"" texoverride.rc)" = 2 ]  || { echo "texoverride.rc version strings are not both $v.0"; bad=1; }
+          top=$(grep -m1 -oE '^## [0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | cut -c4-)
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            [ "$GITHUB_REF_NAME" = "v$v" ] || { echo "tag $GITHUB_REF_NAME but version.h says $v"; bad=1; }
+            [ "$top" = "$v" ]              || { echo "top CHANGELOG section is $top but version.h says $v"; bad=1; }
+          elif [ "$top" != "$v" ]; then
+            echo "::warning::top CHANGELOG section is $top, version.h says $v (fine mid-work, must match before tagging)"
+          fi
+          echo "version.h: $v"
+          exit $bad
+
       # Proves the vendored MinHook is the upstream commit minhook/UPSTREAM.md names, with
       # hook.c as the only local change. That is what a git submodule would have bought, and it
       # costs nothing at build time: continue-on-error means upstream being unreachable can never
@@ -90,6 +111,9 @@ jobs:
           fi
           exit $bad
 
+      # The gate, the settings parser, the revalidation sweep, ctlPath, the parsers and the path
+      # layer all have plain assert-style checks in tools/. They only mean anything if they run
+      # on every push, so this gates the build: a red test never reaches a release.
       - name: Run tests
         shell: cmd
         run: tools\run_tests.bat

@@ -8,6 +8,44 @@
 #include <cstring>
 #include <string>
 #include <set>
+#include <mutex>
+#include <unordered_map>
+
+// FiveM's view of pgRawStreamer's entries (fiCollectionWrapper.h): chunkyArray<RawEntry, 1024, 64>.
+struct RawEntryView {
+    uint64_t packedFileEntry;
+    uint32_t virtFlags, physFlags;
+    uint64_t timestamp;
+    const char* fileName;
+};
+static_assert(sizeof(RawEntryView) == 32, "FiveM RawEntry layout changed");
+
+struct RawEntriesView {
+    RawEntryView* memory[64];
+    uint32_t count;
+};
+
+typedef void* (*GetStreamingManager_t)();
+typedef void* (*GetStreamingModule_t)(void*, const char*);
+typedef const RawEntriesView* (*GetRawEntries_t)();
+typedef uint32_t* (*FindModuleSlot_t)(void*, uint32_t*, const char*);
+
+static GetStreamingManager_t g_getStreamingManagerFn = nullptr;
+static GetStreamingModule_t  g_getStreamingModuleFn = nullptr;
+static GetRawEntries_t       g_getRawEntriesFn = nullptr;
+
+// Leaf lock for the say-it-once caches below (the `said` sets and s_slotWhyByExt). The hook and
+// the beat thread reach them under g_cs, but live reload reaches them from the game's main thread
+// without it, and two unlocked inserts into one std container corrupt the heap. Held only around
+// the container itself: nothing is called and nothing is logged under it.
+static std::mutex g_saidLock;
+static std::unordered_map<std::string, int> s_slotWhyByExt;
+
+static bool firstSaid(std::set<std::string>& said, const std::string& key)
+{
+    std::lock_guard<std::mutex> lk(g_saidLock);
+    return said.insert(key).second;
+}
 
 // rage::strStreamingInfo packs three things into that second dword (Rockstar streamingdefs.h,
 // cross-checked against Cfx's ReleaseObject(idx, 0xF1)):
@@ -30,17 +68,38 @@ const char* strStatusText(uint32_t flags)
 void resolveOccupiedSlotExports()
 {
     if (g_getStreamingManagerFn && g_getStreamingModuleFn && g_getRawEntriesFn) return;
-    HMODULE streamingDll = GetModuleHandleA("gta-streaming-five.dll");
-    if (!streamingDll) return;
-    if (!g_getStreamingManagerFn)
-        g_getStreamingManagerFn = (GetStreamingManager_t)GetProcAddress(streamingDll,
-            "?GetInstance@Manager@streaming@@SAPEAV12@XZ");
-    if (!g_getStreamingModuleFn)
-        g_getStreamingModuleFn = (GetStreamingModule_t)GetProcAddress(streamingDll,
-            "?GetStreamingModule@strStreamingModuleMgr@streaming@@QEAAPEAVstrStreamingModule@2@PEBD@Z");
-    if (!g_getRawEntriesFn)
-        g_getRawEntriesFn = (GetRawEntries_t)GetProcAddress(streamingDll,
-            "?GetPgRawStreamerEntries@rage@@YAAEBU?$chunkyArray@URawEntry@fiCollection@rage@@$0EAA@$0EA@@1@XZ");
+    // Retried by moduleFor while anything is missing: if FiveM loads its streaming DLL after
+    // Setup, the lookups start working instead of answering "exports missing" all session.
+    if (HMODULE streamingDll = GetModuleHandleA("gta-streaming-five.dll")) {
+        if (!g_getStreamingManagerFn)
+            g_getStreamingManagerFn = (GetStreamingManager_t)GetProcAddress(streamingDll,
+                "?GetInstance@Manager@streaming@@SAPEAV12@XZ");
+        if (!g_getStreamingModuleFn)
+            g_getStreamingModuleFn = (GetStreamingModule_t)GetProcAddress(streamingDll,
+                "?GetStreamingModule@strStreamingModuleMgr@streaming@@QEAAPEAVstrStreamingModule@2@PEBD@Z");
+        if (!g_getRawEntriesFn)
+            g_getRawEntriesFn = (GetRawEntries_t)GetProcAddress(streamingDll,
+                "?GetPgRawStreamerEntries@rage@@YAAEBU?$chunkyArray@URawEntry@fiCollection@rage@@$0EAA@$0EA@@1@XZ");
+    }
+    static bool said = false;
+    if (!said) {
+        said = true;
+        LOG_INFO(LogCategory::Core, "Slot lookup exports: manager=%s module=%s rawEntries=%s",
+                 g_getStreamingManagerFn ? "ok" : "MISSING", g_getStreamingModuleFn ? "ok" : "MISSING",
+                 g_getRawEntriesFn ? "ok" : "MISSING");
+    }
+}
+
+static StrMgr* exportedManagerSafe()
+{
+    if (!g_getStreamingManagerFn) return nullptr;
+    __try {
+        StrMgr* manager = (StrMgr*)g_getStreamingManagerFn();
+        if (!manager || !manager->entries || manager->numEntries <= 0 || manager->numEntries > 10000000)
+            return nullptr;
+        return manager;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 }
 
 // What a loaded slot really costs. The cost audit at scan time can only read the RSC7 page flags
@@ -65,9 +124,7 @@ void resolveOccupiedSlotExports()
 // not for the pixels of texture dictionaries it shares. Walk it properly if a shared-texture
 // report ever needs the difference.
 //
-// Read-only: it looks up the streaming module (moduleMgr at +0x1B8, the offset Cfx's Streaming.h
-// uses too), asks it for the dependency list, and recurses. SEH because it walks game-owned
-// arrays that a mid-eviction slot can leave half valid.
+// Read-only. SEH because it walks game-owned arrays that a mid-eviction slot can leave half valid.
 typedef uint64_t (*CountDepMem_t)(void* mgr, uint32_t idx);
 typedef uint64_t (*ComputePhysSize_t)(void* entry, uint32_t idx);   // __thiscall: entry is `this`
 static CountDepMem_t g_countDepMemFn = nullptr;
@@ -105,7 +162,7 @@ void slotMemoryCost(uint32_t id, uint64_t* virt, uint64_t* phys)
 
 // Contains no C++ objects so the virtual lookup can be isolated behind SEH. XBRVirtual inserts
 // six methods at build 2802, making FindSlot vtable entry 8 there and entry 2 on older builds.
-uint32_t findModuleSlotSafe(void* module, const char* stem, int build)
+static uint32_t findModuleSlotSafe(void* module, const char* stem, int build)
 {
     __try {
         if (!module || !stem || !build) return 0xFFFFFFFF;
@@ -123,7 +180,7 @@ uint32_t findModuleSlotSafe(void* module, const char* stem, int build)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0xFFFFFFFF; }
 }
 
-const char* slotWhyText(int w)
+static const char* slotWhyText(int w)
 {
     switch (w) {
     case SLOT_OK:         return "ok";
@@ -135,60 +192,69 @@ const char* slotWhyText(int w)
     }
 }
 
-uint32_t targetStreamingId(const char* slot, int* why)
+// The streaming module for a file type, or null. *why says which step failed.
+static void* moduleFor(const std::string& extension, int* why)
 {
-    auto fail = [&](int w) { if (why) *why = w; return 0xFFFFFFFFu; };
-    if (!slot) return fail(SLOT_BAD_NAME);
-    if (!g_getStreamingManagerFn || !g_getStreamingModuleFn) return fail(SLOT_NO_EXPORTS);
-    const char* file = strrchr(slot, '/');
-    file = file ? file + 1 : slot;
-    const char* dot = strrchr(file, '.');
-    if (!dot || dot == file || !dot[1]) return fail(SLOT_BAD_NAME);
-    try {
-        std::string stem(file, (size_t)(dot - file));
-        std::string extension(dot + 1);
-        void* manager = g_getStreamingManagerFn();
-        if (!manager) return fail(SLOT_NO_MANAGER);
-        // streaming::Manager::moduleMgr is at 0x1B8 in FiveM's exported Streaming.h layout.
-        void* module = g_getStreamingModuleFn((uint8_t*)manager + 0x1B8, extension.c_str());
-        if (!module) return fail(SLOT_NO_MODULE);
-        uint32_t id = findModuleSlotSafe(module, stem.c_str(), runningGameBuild());
-        // Slotted keys (folder/file) are also tried as "folder/stem" and "folder\stem": audio
-        // banks are addressed as pack/bank and nobody knows which spelling the module keys on.
-        // The log says which one hit, once per extension, so the answer lands in a user log.
-        if (id == 0xFFFFFFFF && file != slot) {
-            std::string folder(slot, (size_t)(file - slot - 1));
-            const char* seps[] = { "/", "\\" };
-            for (const char* sep : seps) {
-                std::string alt = folder + sep + stem;
-                id = findModuleSlotSafe(module, alt.c_str(), runningGameBuild());
-                if (id != 0xFFFFFFFF) {
-                    static std::set<std::string> said;
-                    if (said.insert(extension).second)
-                        LOG_INFO(LogCategory::Claim, "Slot lookup for .%s: the module keys on \"%s\" (folder%sname), not the bare name", extension.c_str(), alt.c_str(), sep);
-                    break;
-                }
-            }
-        }
-        if (id == 0xFFFFFFFF) return fail(SLOT_NO_NAME);
-        if (why) *why = SLOT_OK;
-        return id;
-    }
-    catch (...) { return fail(SLOT_NO_MANAGER); }
+    if (!g_getStreamingManagerFn || !g_getStreamingModuleFn) resolveOccupiedSlotExports();
+    if (!g_getStreamingManagerFn || !g_getStreamingModuleFn) { *why = SLOT_NO_EXPORTS; return nullptr; }
+    void* manager = g_getStreamingManagerFn();
+    if (!manager) { *why = SLOT_NO_MANAGER; return nullptr; }
+    // streaming::Manager::moduleMgr is at 0x1B8 in FiveM's exported Streaming.h layout.
+    void* module = g_getStreamingModuleFn((uint8_t*)manager + 0x1B8, extension.c_str());
+    if (!module) { *why = SLOT_NO_MODULE; return nullptr; }
+    return module;
 }
 
-void noteSlotWhy(const char* slot, int why)
+uint32_t targetStreamingId(const char* slot, int* why)
 {
-    const char* dot = strrchr(slot, '.');
-    if (!dot || !dot[1]) return;
-    std::string ext = lower(dot + 1);
-    auto it = g_slotWhyByExt.find(ext);
-    if (it != g_slotWhyByExt.end() && it->second == why) return;
-    g_slotWhyByExt[ext] = why;
+    int w = SLOT_OK;
+    uint32_t id = 0xFFFFFFFF;
+    try {
+        const char* file = slot ? strrchr(slot, '/') : nullptr;
+        file = file ? file + 1 : slot;
+        const char* dot = file ? strrchr(file, '.') : nullptr;
+        if (!dot || dot == file || !dot[1]) w = SLOT_BAD_NAME;
+        else if (void* module = moduleFor(dot + 1, &w)) {
+            std::string stem(file, (size_t)(dot - file));
+            id = findModuleSlotSafe(module, stem.c_str(), runningGameBuild());
+            // Slotted keys (folder/file) are also tried as "folder/stem" and "folder\stem": audio
+            // banks are addressed as pack/bank and nobody knows which spelling the module keys on.
+            // The log says which one hit, once per extension, so the answer lands in a user log.
+            if (id == 0xFFFFFFFF && file != slot) {
+                std::string folder(slot, (size_t)(file - slot - 1));
+                for (const char* sep : { "/", "\\" }) {
+                    std::string alt = folder + sep + stem;
+                    id = findModuleSlotSafe(module, alt.c_str(), runningGameBuild());
+                    if (id != 0xFFFFFFFF) {
+                        static std::set<std::string> said;
+                        if (firstSaid(said, dot + 1))
+                            LOG_INFO(LogCategory::Claim, "Slot lookup for .%s: the module keys on \"%s\" (folder%sname), not the bare name", dot + 1, alt.c_str(), sep);
+                        break;
+                    }
+                }
+            }
+            if (id == 0xFFFFFFFF) w = SLOT_NO_NAME;
+        }
+    }
+    catch (...) { w = SLOT_NO_MANAGER; id = 0xFFFFFFFF; }
+    if (why) *why = w;
+    return w == SLOT_OK ? id : 0xFFFFFFFF;
+}
+
+static void noteSlotWhy(const char* slot, int why)
+{
+    std::string ext = extOf(slot);
+    if (ext.empty()) return;
+    {
+        std::lock_guard<std::mutex> lk(g_saidLock);
+        auto it = s_slotWhyByExt.find(ext);
+        if (it != s_slotWhyByExt.end() && it->second == why) return;
+        s_slotWhyByExt[ext] = why;
+    }
     LOG_INFO(LogCategory::Claim, "Slot lookup for .%s: %s", ext.c_str(), slotWhyText(why));
 }
 
-bool localRawHandle(const char* file, uint32_t* handle)
+static bool localRawHandle(const char* file, uint32_t* handle)
 {
     if (!file || !handle || !g_getRawEntriesFn) return false;
     __try {
@@ -218,29 +284,14 @@ bool validStreamingId(uint32_t id)
            id < (uint32_t)g_mgr->numEntries;
 }
 
-StrMgr* exportedManagerSafe()
-{
-    if (!g_getStreamingManagerFn) return nullptr;
-    __try {
-        StrMgr* manager = (StrMgr*)g_getStreamingManagerFn();
-        if (!manager || !manager->entries || manager->numEntries <= 0 || manager->numEntries > 10000000)
-            return nullptr;
-        return manager;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
-}
-
 // Look up ONE exact key, no fallbacks. targetStreamingId cannot answer this question, because its
 // folder fallback only runs when the bare name MISSES, and for these files the bare name hits.
-static uint32_t slotForExactKey(const char* extension, const char* key)
+static uint32_t slotForExactKey(const std::string& extension, const char* key)
 {
-    if (!g_getStreamingManagerFn || !g_getStreamingModuleFn) return 0xFFFFFFFF;
     try {
-        void* manager = g_getStreamingManagerFn();
-        if (!manager) return 0xFFFFFFFF;
-        void* module = g_getStreamingModuleFn((uint8_t*)manager + 0x1B8, extension);
-        if (!module) return 0xFFFFFFFF;
-        return findModuleSlotSafe(module, key, runningGameBuild());
+        int why = SLOT_OK;
+        void* module = moduleFor(extension, &why);
+        return module ? findModuleSlotSafe(module, key, runningGameBuild()) : 0xFFFFFFFF;
     }
     catch (...) { return 0xFFFFFFFF; }
 }
@@ -252,25 +303,24 @@ static uint32_t slotForExactKey(const char* extension, const char* key)
 // reading the other, which is exactly the shape of "registered, loaded from your file, still draws
 // vanilla". Root keys carry no folder, so nothing on the normal path ever probes the container form.
 // Returns a second, different index for this name, or 0xFFFFFFFF.
-uint32_t containerAliasId(const char* slot, uint32_t primary)
+static uint32_t containerAliasId(const char* slot, uint32_t primary)
 {
     static const char* kContainers[] = {
         "ped_mp_overlay_txds", "strm_peds_mp_overlay_txds",
         "streamedpeds_mp", "streamedpeds_players",
     };
-    if (!slot || strchr(slot, 0x2F)) return 0xFFFFFFFF;   // root keys only
-    const char* dot = strrchr(slot, 0x2E);
+    if (!slot || strchr(slot, '/')) return 0xFFFFFFFF;   // root keys only
+    const char* dot = strrchr(slot, '.');
     if (!dot || dot == slot || !dot[1]) return 0xFFFFFFFF;
     std::string stem(slot, (size_t)(dot - slot));
     std::string extension(dot + 1);
-    const char* seps[] = { "/", "\\" };
     for (const char* container : kContainers) {
-        for (const char* sep : seps) {
+        for (const char* sep : { "/", "\\" }) {
             std::string key = std::string(container) + sep + stem;
-            uint32_t id = slotForExactKey(extension.c_str(), key.c_str());
+            uint32_t id = slotForExactKey(extension, key.c_str());
             if (validStreamingId(id) && id != primary) {
                 static std::set<std::string> said;
-                if (said.insert(extension).second)
+                if (firstSaid(said, extension))
                     LOG_INFO(LogCategory::Claim, "Slot lookup for .%s: this name also owns the slot \"%s\" (id=%u), which is NOT the one the bare name resolves to; pinning both", extension.c_str(), key.c_str(), id);
                 return id;
             }
@@ -279,12 +329,14 @@ uint32_t containerAliasId(const char* slot, uint32_t primary)
     return 0xFFFFFFFF;
 }
 
-int recoverOccupiedSlot(Ov& ov)
+// registerRawStreamingFile refused the name because the slot already holds a handle. Find the
+// raw entry for our own file and attach it to the slot the name resolves to.
+static ClaimResult recoverOccupiedSlot(Ov& ov)
 {
     resolveOccupiedSlotExports();
     if (!g_mgr) g_mgr = exportedManagerSafe();
     uint32_t rawHandle = 0;
-    if (!localRawHandle(ov.gfile ? ov.gfile : ov.file, &rawHandle)) return OCCUPIED_FAILED;
+    if (!localRawHandle(ov.file, &rawHandle)) return CLAIM_REJECTED;
     ov.handle = rawHandle;
 
     int why = SLOT_OK;
@@ -292,7 +344,7 @@ int recoverOccupiedSlot(Ov& ov)
     noteSlotWhy(ov.slot, why);   // "no module for this type" vs "does not know that name" is the whole diagnosis
     if (!validStreamingId(target)) {
         ov.id = 0xFFFFFFFF;
-        return OCCUPIED_WAITING;
+        return CLAIM_WAITING;
     }
     ov.id = target;
     if (ov.altId == 0xFFFFFFFF) ov.altId = containerAliasId(ov.slot, target);
@@ -300,6 +352,37 @@ int recoverOccupiedSlot(Ov& ov)
         StrEntry& entry = g_mgr->entries[target];
         if (entry.handle != ov.handle && (entry.flags & 3) < 2) entry.handle = ov.handle;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return OCCUPIED_FAILED; }
-    return OCCUPIED_ATTACHED;
+    __except (EXCEPTION_EXECUTE_HANDLER) { return CLAIM_REJECTED; }
+    return CLAIM_TAKEOVER;
+}
+
+// Ask the store what this name resolves to BEFORE claiming it. o_regRaw mints a fresh index and
+// re-points the name at it, so the same question asked afterwards can only ever hand back the id
+// we were just given. That is what it did: on a 335 file pack every claim came back "unaliased"
+// while the ids themselves were 335 consecutive integers in registration order, which scattered
+// vanilla names could not possibly own.
+//
+// And a claim that SUCCEEDS is not proof we took the slot over. For a name the game already owns,
+// registerRawStreamingFile can mint a brand new index and hand that back while the store keeps
+// resolving the name to its original one. The handle then lands in a slot nothing looks up and
+// the log reads perfectly while nothing changes in game (seen on .ycd: seven scattered vanilla
+// dictionaries came back with seven CONSECUTIVE ids). So the entry the store resolved the name to
+// before we touched it is pinned as well, as altId.
+//
+// No SEH around o_regRaw, on purpose: it inserts into the game's name tables, and a fault caught
+// half way through leaves them broken for the rest of the session, to die later looking like
+// somebody else's bug. Both callers journal the key first, so a crash here costs one launch.
+ClaimResult claimOne(Ov& ov)
+{
+    int why = SLOT_OK;
+    uint32_t before = targetStreamingId(ov.slot, &why);
+    uint32_t id = 0xFFFFFFFF;
+    o_regRaw(&id, ov.file, g_b1, ov.slot, g_b2);
+    ov.id = id;
+    if (id == 0xFFFFFFFF) return recoverOccupiedSlot(ov);
+    noteSlotWhy(ov.slot, why);
+    if (validStreamingId(before) && before != id) ov.altId = before;
+    if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
+        ov.handle = g_mgr->entries[id].handle;
+    return ov.handle ? CLAIM_DIRECT : CLAIM_NO_HANDLE;
 }

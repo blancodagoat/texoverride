@@ -1,4 +1,5 @@
 #include "features/scanner.h"
+#include "features/crash_saver.h"
 #include "core/state.h"
 #include "core/logger.h"
 #include "core/utils.h"
@@ -8,107 +9,111 @@
 #include <windows.h>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
+
+std::string overrideKeyFor(const std::string& name, const std::string& childRel, bool announce)
+{
+    std::string ln = lower(name), relFwd = fwd(childRel);
+    if (isIgnoredType(ln, relFwd, announce)) return "";
+    if (!isOverrideExt(ln)) return "";
+    // SAFETY GATE: the key is collection/file or a bare name, whatever folders sit above it
+    // (slotKeyFor). Folders that are not collections are the user's own organisation.
+    std::string relKey = lower(relFwd);
+    const char* why = nullptr;
+    std::string key = slotKeyFor(relKey, &why);
+    if (key.empty()) {
+        if (announce) LOG_WARN(LogCategory::Scan, "SKIP %s - %s", relKey.c_str(), why ? why : "refused");
+        return "";
+    }
+    if (isQuarantined(key)) return "";   // crash saver; already logged loudly
+    return key;
+}
 
 // The walk itself opens nothing: it only decides which names are ours.
 // One key can only be provided once. Two packs shipping the same file keep the first one seen,
 // unless the later one sits under an *_override folder, which is the user saying which copy wins.
-static std::unordered_map<std::string, size_t> g_seenKeys;   // key -> where it sits in out
-
-void walkDir(const std::string& base, const std::string& rel, std::vector<Cand>& out)
+static std::vector<Cand> walkOverrides()
 {
-    if (rel.empty()) g_seenKeys.clear();
-    std::string pattern = base + rel + "\\*";
-    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        std::string name = fd.cFileName;
-        if (name == "." || name == "..") continue;
-        std::string childRel = rel.empty() ? name : rel + "\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (isDisabledFolder(name)) { LOG_INFO(LogCategory::Scan, "DISABLED %s - folder skipped; rename it without the disabled prefix to load it", fwd(childRel).c_str()); continue; }
-            walkDir(base, childRel, out); continue;
+    std::vector<Cand> out;
+    std::unordered_map<std::string, size_t> seen;   // key -> where it sits in out
+    const std::string base = g_overrideDir;
+    walkTree(base, "", [&](const WalkItem& it) {
+        if (it.dir) {
+            if (!isDisabledFolder(it.name)) return true;
+            LOG_INFO(LogCategory::Scan, "DISABLED %s - folder skipped; rename it without the disabled prefix to load it", fwd(it.childRel).c_str());
+            return false;
         }
-        std::string ln = lower(name);
-        if (isIgnoredType(ln, fwd(childRel), true)) continue;
-        if (!isOverrideExt(ln)) continue;
-        std::string relStr = lower(fwd(childRel));
-        // SAFETY GATE: the key is collection/file or a bare name, whatever folders sit above it
-        // (slotKeyFor). Folders that are not collections are the user's own organisation.
-        const char* why = nullptr;
-        std::string slotStr = slotKeyFor(relStr, &why);
-        if (slotStr.empty()) {
-            LOG_WARN(LogCategory::Scan, "SKIP %s - %s", relStr.c_str(), why ? why : "refused");
-            continue;
-        }
+        std::string slot = overrideKeyFor(it.name, it.childRel, true);
+        if (slot.empty()) return false;
+        std::string relStr = lower(fwd(it.childRel));
         bool prio = isOverridePath(relStr);           // *_override folder: this copy wins
-        auto seen = g_seenKeys.find(slotStr);
-        if (seen != g_seenKeys.end()) {
-            Cand& held = out[seen->second];
+        auto s = seen.find(slot);
+        if (s != seen.end()) {
+            Cand& held = out[s->second];
             if (prio && !held.prio) {
-                LOG_INFO(LogCategory::Scan, "PREFERRED %s - %s takes the slot from %s", slotStr.c_str(), relStr.c_str(), ::rel(held.full.c_str()));
-                held.full = fwd(base + childRel);
+                LOG_INFO(LogCategory::Scan, "PREFERRED %s - %s takes the slot from %s", slot.c_str(), relStr.c_str(), rel(held.full.c_str()));
+                held.full = fwd(base + it.childRel);
                 held.prio = true;
             } else {
                 LOG_WARN(LogCategory::Scan, "DUPLICATE %s - %s provides the same file as one already listed; this copy is ignored%s",
-                         slotStr.c_str(), relStr.c_str(), prio && held.prio ? " (another _override folder got there first)" : "");
+                         slot.c_str(), relStr.c_str(), prio && held.prio ? " (another _override folder got there first)" : "");
             }
-            continue;
+            return false;
         }
-        if (g_quarantine.count(slotStr)) continue;   // crash saver; already logged loudly
-        g_seenKeys[slotStr] = out.size();
-        out.push_back({ slotStr, fwd(base + childRel), Cost(), prio });
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
+        seen[slot] = out.size();
+        out.push_back({ slot, fwd(base + it.childRel), Cost(), prio });
+        return false;
+    });
+    return out;
 }
 
 // Runs on the beat thread, NOT in DllMain. Everything here opens files, and Setup() sits in
 // front of the game's entry point: doing it there meant a big pack held the loading screen
 // before the game had even started. The hook waits on g_scanDone before it registers anything,
 // so the game gets on with its own startup while this runs.
-void scanFinish()
+void scanOverrides()
 {
+    std::vector<Cand> cands = walkOverrides();
+    LOG_INFO(LogCategory::Scan, "Discovered %zu candidate file(s); reading headers...", cands.size());
     ULONGLONG t0 = GetTickCount64();
-    readCosts(g_cands);
-    EnterCriticalSection(&g_cs);   // the watcher can be appending to g_ovs by now
+    readCosts(cands);
+
+    uint64_t costVirt = 0, costPhys = 0;
+    std::vector<std::pair<uint64_t, std::string>> costBig;
     int n = 0;
-    for (auto& cd : g_cands) {
-        if (cannotLoad(cd.slot.c_str(), cd.c, false)) continue;
-        const char* slot = _strdup(cd.slot.c_str());
-        const char* file = _strdup(cd.full.c_str());   // our absolute path
-        g_ovs.push_back({ slot, file, toUtf8(file) });
-        g_bySlot[slot] = file;
-        ++n;
-        if (cd.c.rsc) {
-            g_costVirt += cd.c.cv; g_costPhys += cd.c.cp;
-            if (cd.c.cv + cd.c.cp >= (8u << 20)) g_costBig.push_back({ cd.c.cv + cd.c.cp, cd.slot });
+    {
+        CsLock lk(g_cs);   // live reload appends to both later; take it now so the rule has no exception
+        for (auto& cd : cands) {
+            if (cannotLoad(cd.slot.c_str(), cd.c, false)) continue;
+            const char* slot = _strdup(cd.slot.c_str());
+            const char* file = _strdup(cd.full.c_str());   // our absolute path
+            g_ovs.push_back({ slot, file });
+            g_bySlot[slot] = file;
+            ++n;
+            if (cd.c.rsc) {
+                costVirt += cd.c.cv; costPhys += cd.c.cp;
+                if (cd.c.cv + cd.c.cp >= (8u << 20)) costBig.push_back({ cd.c.cv + cd.c.cp, cd.slot });
+            }
         }
     }
-    LeaveCriticalSection(&g_cs);
-    LOG_INFO(LogCategory::Scan, "Loaded %d override(s) in %.1fs (mode %s)", n, (GetTickCount64() - t0) / 1000.0, g_off ? "OFF" : "ON");
-    // say it out loud when the two path forms differ, so the next report of this arrives already
-    // diagnosed instead of looking like "nothing works and the log looks fine"
-    if (!g_ovs.empty() && g_ovs[0].gfile && g_ovs[0].gfile != g_ovs[0].file)
-        LOG_INFO(LogCategory::Scan, "Folder path contains non-English characters; using UTF-8 representation");
+    LOG_INFO(LogCategory::Scan, "Loaded %d override(s) in %.1fs", n, (GetTickCount64() - t0) / 1000.0);
 
-    // Separate collection folders from loose root assets
+    // Nothing else writes g_ovs until the watcher starts, which is after this returns.
     std::unordered_map<std::string, int> collCounts;
     std::unordered_map<std::string, int> rootExtCounts;
     for (auto& ov : g_ovs) {
-        size_t s = std::string(ov.slot).find('/');
-        if (s != std::string::npos) {
-            ++collCounts[std::string(ov.slot).substr(0, s)];
-        } else {
-            const char* dot = strrchr(ov.slot, '.');
-            std::string ext = (dot && dot[1]) ? lower(dot + 1) : "(none)";
-            ++rootExtCounts[ext];
+        const char* slash = strchr(ov.slot, '/');
+        if (slash) ++collCounts[std::string(ov.slot, (size_t)(slash - ov.slot))];
+        else {
+            std::string ext = extOf(ov.slot);
+            ++rootExtCounts[ext.empty() ? "(none)" : ext];
         }
     }
 
     if (!collCounts.empty()) {
         LOG_INFO(LogCategory::Scan, "  Collections (%zu):", collCounts.size());
-        for (auto& kv : collCounts) {
+        for (auto& kv : collCounts)
             LOG_INFO(LogCategory::Scan, "    %-38s %3d file(s)  [%s]", kv.first.c_str(), kv.second, classifyCollection(kv.first));
-        }
     }
     if (!rootExtCounts.empty()) {
         LOG_INFO(LogCategory::Scan, "  Root Assets:");
@@ -133,7 +138,7 @@ void scanFinish()
         static const char* kUnreachable[] = { "mp_fm_skin_", "mp_fm_faov_", "ng_hip_faov_", "mp_eye_colour" };
         int unreachable = 0;
         for (auto& ov : g_ovs) {
-            if (strchr(ov.slot, 0x2F)) continue;            // root keys only
+            if (strchr(ov.slot, '/')) continue;            // root keys only
             for (const char* pre : kUnreachable)
                 if (_strnicmp(ov.slot, pre, strlen(pre)) == 0) { ++unreachable; break; }
         }
@@ -141,6 +146,5 @@ void scanFinish()
             LOG_WARN(LogCategory::Scan, "  %d body skin / face overlay file(s) here (mp_fm_skin_*, mp_fm_faov_*, ng_hip_faov_*, mp_eye_colour). These CANNOT be replaced from tex_overrides: the slot claim works and the log will say your file loaded, but the ped is built from these earlier and keeps the stock look. Ship them in a FiveM mods folder package instead. Head models and head textures in a collection folder are unaffected.", unreachable);
     }
 
-    costReport();
-    g_cands.clear(); g_cands.shrink_to_fit();
+    costReport(costVirt, costPhys, costBig);
 }

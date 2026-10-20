@@ -1,6 +1,8 @@
 #include "core/utils.h"
 #include "core/state.h"
+#include "core/logger.h"
 #include <windows.h>
+#include <share.h>
 #include <cstdlib>
 #include <cstring>
 #include <cctype>
@@ -17,55 +19,123 @@ std::string fwd(std::string s)
     return s;
 }
 
+std::string trim(const std::string& s)
+{
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return std::string();
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+std::string extOf(const char* key)
+{
+    const char* dot = key ? strrchr(key, '.') : nullptr;
+    return (dot && dot[1]) ? lower(dot + 1) : std::string();
+}
+
 const char* rel(const char* file)
 {
     size_t n = strlen(g_overrideDir);
     return strlen(file) > n ? file + n : file;
 }
 
-// FiveM reads EVERY narrow path it is handed as UTF-8: Cfx's ToWide (client/shared/Utils.cpp)
-// runs utf8::replace_invalid over it before touching the disk. Our scan builds paths with the
-// ANSI Win32 APIs instead. For an ASCII path those are the same bytes, which is why this went
-// unnoticed. Put one non-ASCII letter in the Windows username and the ANSI bytes are invalid
-// UTF-8, get swapped for U+FFFD, the path no longer exists, and every single claim comes back
-// 0xFFFFFFFF with nothing on the ped and nothing in the log to say why. Reported on a Turkish
-// username (issue #2) and proven there: same files, same build, ASCII account, worked at once.
-// ANSI stays for our own file I/O, which is correct on the user's own code page.
-const char* toUtf8(const char* ansi)
-{
-    for (const unsigned char* p = (const unsigned char*)ansi; ; ++p) {
-        if (!*p) return ansi;             // pure ASCII: identical in both, share the string
-        if (*p > 0x7F) break;
-    }
-    int wn = MultiByteToWideChar(CP_ACP, 0, ansi, -1, nullptr, 0);
-    if (wn <= 0) return ansi;
-    std::wstring w((size_t)wn, L'\0');
-    if (!MultiByteToWideChar(CP_ACP, 0, ansi, -1, &w[0], wn)) return ansi;
-    int un = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (un <= 0) return ansi;
-    char* out = (char*)malloc((size_t)un);
-    if (!out) return ansi;
-    if (!WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out, un, nullptr, nullptr)) { free(out); return ansi; }
-    return out;                           // leaked on purpose, like every other path here
-}
-
 bool hasExt(const std::string& k, const char* e)
 {
-    return k.size() > 4 && k.compare(k.size() - 4, 4, e) == 0;
+    size_t n = strlen(e);
+    return k.size() > n && k.compare(k.size() - n, n, e) == 0;
 }
 
-// Control files (_off, _debug, _budget ...). One rule for all of them: the bare name works and
-// so does the .txt form. Windows Explorer hides known extensions, so "create an empty file named
-// _OFF, no extension" reliably produces _OFF.txt for some people, and "create _debug.txt"
-// reliably produces _debug.txt.txt for others. Accepting both spellings makes either mistake a
-// non-event, and costs nothing next to renaming files under every existing install. Casing needs
-// no code: Win32 paths are case-insensitive, so _OFF.txt already IS _off.txt.
+// Control files (_off, _budget ...). One rule for all of them: the bare name works and so does
+// the .txt form. Windows Explorer hides known extensions, so "create an empty file named _OFF, no
+// extension" reliably produces _OFF.txt for some people, and "create _off.txt" reliably produces
+// _off.txt.txt for others. Accepting both spellings makes either mistake a non-event, and costs
+// nothing next to renaming files under every existing install. Casing needs no code: Win32 paths
+// are case-insensitive, so _OFF.txt already IS _off.txt.
 // Returns the path that exists, or an empty string when neither does.
 std::string ctlPath(const char* name)
 {
     std::string p = std::string(g_overrideDir) + name;
-    if (GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    if (fileExists(p)) return p;
     p += ".txt";
-    if (GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    if (fileExists(p)) return p;
     return std::string();
+}
+
+uint32_t joaat(const char* s, size_t n)
+{
+    uint32_t h = 0;
+    for (size_t i = 0; i < n; ++i) { h += (uint8_t)tolower((unsigned char)s[i]); h += h << 10; h ^= h >> 6; }
+    h += h << 3; h ^= h >> 11; h += h << 15; return h;
+}
+
+std::wstring widen(const std::string& utf8)
+{
+    if (utf8.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), nullptr, 0);
+    std::wstring w((size_t)(n > 0 ? n : 0), L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, utf8.data(), (int)utf8.size(), &w[0], n);
+    return w;
+}
+
+std::string narrow(const wchar_t* w)
+{
+    if (!w || !*w) return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return std::string();
+    std::string s((size_t)n - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+std::string modulePath(void* module)
+{
+    std::wstring buf(32768, L'\0');   // the long-path ceiling, so a deep install is never cut short
+    DWORD n = GetModuleFileNameW((HMODULE)module, &buf[0], (DWORD)buf.size());
+    if (!n || n >= buf.size()) return std::string();
+    buf.resize(n);
+    return narrow(buf.c_str());
+}
+
+FILE* openFile(const std::string& path, const char* mode)
+{
+    return _wfsopen(widen(path).c_str(), widen(mode).c_str(), _SH_DENYNO);
+}
+
+bool deleteFile(const std::string& path)
+{
+    return DeleteFileW(widen(path).c_str()) != 0;
+}
+
+bool fileExists(const std::string& path)
+{
+    return GetFileAttributesW(widen(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+void walkTree(const std::string& base, const std::string& sub, const std::function<bool(const WalkItem&)>& visit, int depth)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(widen(base + sub + (sub.empty() ? "*" : "\\*")).c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        std::string name = narrow(fd.cFileName);
+        if (name.empty() || name == "." || name == "..") continue;
+        WalkItem it;
+        it.name = name;
+        it.childRel = sub.empty() ? name : sub + "\\" + name;
+        it.dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        it.writeTime = ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime;
+        it.size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        if (!visit(it) || !it.dir) continue;
+        if (depth + 1 >= kMaxWalkDepth) {
+            static bool said = false;
+            if (!said) {
+                said = true;
+                LOG_WARN(LogCategory::Scan, "SKIP %s - folders nested %d deep (or a folder link that points back up the tree); not entered",
+                         fwd(it.childRel).c_str(), kMaxWalkDepth);
+            }
+            continue;
+        }
+        walkTree(base, it.childRel, visit, depth + 1);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
 }

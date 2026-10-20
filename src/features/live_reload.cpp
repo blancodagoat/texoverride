@@ -1,22 +1,23 @@
 #include "features/live_reload.h"
 #include "features/clean_shot.h"
+#include "features/crash_saver.h"
+#include "features/placement.h"
+#include "features/scanner.h"
 #include "core/state.h"
 #include "core/cfx.h"
-#include "core/settings.h"
 #include "core/logger.h"
+#include "core/pattern.h"
 #include "core/utils.h"
 #include "streaming/gate.h"
 #include "streaming/budget.h"
 #include "streaming/rsc.h"
 #include "streaming/streaming.h"
-#include "features/placement.h"
-#include "features/crash_saver.h"
-#include <windows.h>
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
-#include <cstring>
+#include <deque>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // ============================ live reload (watch tex_overrides) ============================
@@ -25,39 +26,56 @@
 //
 //   - edited placement .xml  -> re-parsed, layout carried over, applied by the next beat
 //   - overwritten .ytd/.ydd  -> raw-streamer entry invalidated so the next load re-reads the file
-//                               (Cfx's own trick: timestamp = 0, then GetEntry re-stats — see
+//                               (Cfx's own trick: timestamp = 0, then GetEntry re-stats; see
 //                               LoadStreamingFile.cpp; the game shows it when the item reloads)
 //   - brand-new file         -> registered mid-session, exactly what Cfx does on every resource
 //                               restart (CfxCollection_AddStreamingFileByTag -> LoadStreamingFiles)
 //
-// THREADING — the two game-touching operations (register, re-stat) never run on the watcher
+// THREADING: the two game-touching operations (register, re-stat) never run on the watcher
 // thread. RAGE's registration path (strStreamingInfoManager::RegisterObject -> module->Register)
 // inserts into name tables with no lock, and the game's main thread reads those tables all the
 // time; that is why Cfx runs its own mid-session registrations on the main thread
-// (OnMainGameFrame). We reach the same thread without another code hook: the game's main loop
-// pumps messages through its user32 PeekMessageW import every frame (Cfx's ZOffThreadWindowing
-// IAT-hooks that exact import), so the watcher queues work and our own IAT shim on that import
-// drains the queue on the main thread. An IAT swap is a pointer write in the exe's import table,
-// the same mechanism every overlay uses.
+// (OnMainGameFrame). We subscribe to that same event; on a FiveM that does not export it, an IAT
+// shim on the game's PeekMessageW import (Cfx's ZOffThreadWindowing hooks that exact import, and
+// the main loop pumps it every frame) gets us there instead. The watcher queues work, the main
+// thread drains it.
 //
-// CRASH SAVER — before a batch is handed to the game thread it is journaled to
-// tex_overrides\_inflight.txt, and the journal stays for 30 seconds after it applies (a broken
-// texture usually crashes within moments of streaming in). If the game dies inside that window,
-// the next launch moves those names into _quarantine.txt, refuses to load them, and says so in
-// the log. Deleting _quarantine.txt lifts it. A bad file can crash at most one session.
+// CRASH SAVER: before a batch is handed to the game thread it is journaled (crash_saver.cpp), and
+// the journal stays for 30 seconds after it is queued. If the game dies inside that window, the
+// next launch quarantines those names. A bad file can crash at most one session.
 
-// every call site freed slot and file and forgot gfile, which 0.8.3 added beside them
-void freeLiveOp(LiveOp& op)
+typedef void* (*GetRawStreamer_t)();
+typedef uint8_t* (*RawGetEntry_t)(void*, uint16_t);
+typedef BOOL (WINAPI* PeekMsg_t)(LPMSG, HWND, UINT, UINT, UINT);
+
+struct Snap { uint64_t wt, size; };
+
+static GetRawStreamer_t g_getRawStreamerFn = nullptr;
+static RawGetEntry_t    g_rawGetEntryFn = nullptr;
+static std::deque<LiveOp> g_opQ;                           // under g_cs
+static volatile LONG g_opsPending = 0;
+static PeekMsg_t g_origPeek = nullptr;
+static DWORD g_pumpTid = 0;
+static bool g_pumpReady = false;                           // a main-thread pump is live, whichever it is
+static bool g_framePumpConnected = false;                  // OnMainGameFrame, subscribed in Setup()
+static std::unordered_map<std::string, Snap> g_snap;      // watcher thread only
+
+void locateRawStreamer()
 {
-    free((void*)op.ov.slot); free((void*)op.ov.file);
-    if (op.ov.gfile && op.ov.gfile != op.ov.file) free((void*)op.ov.gfile);
-    op.ov.slot = op.ov.file = op.ov.gfile = nullptr;
+    const short PAT_GRS[] = { 0x48,0x8B,0xD3,0x4C,0x8B,0x00,0x48,0x8B,0xC8,0x41,0xFF,0x90,-1,0x01,0x00,0x00,0x8B,0xD8,0xE8 };
+    if (uint8_t* q = scanModule(PAT_GRS)) {
+        if (q[-5] == 0xE8) g_getRawStreamerFn = (GetRawStreamer_t)ripTarget(q - 4);
+    }
+    const short PAT_GE[] = { 0x0F,0xB7,0xC3,0x48,0x8B,0x5C,0x24,0x30,0x8B,0xD0,0x25,0xFF };
+    if (uint8_t* q = scanModule(PAT_GE)) g_rawGetEntryFn = (RawGetEntry_t)(q - 0x14);
+    LOG_INFO(LogCategory::Live, "Live reload exports: rawStreamer=%s getEntry=%s",
+             g_getRawStreamerFn ? "ok" : "MISSING", g_rawGetEntryFn ? "ok" : "MISSING");
 }
 
 // Overwritten file: zero the raw entry's timestamp, then GetEntry re-stats it (new size picked
-// up). Without this an overwritten file keeps its old cached size — short or wild reads.
+// up). Without this an overwritten file keeps its old cached size: short or wild reads.
 // RawEntry layout from Cfx fiCollectionWrapper.h: fe 16 bytes, timestamp at +16.
-bool rawInvalidate(uint32_t handle)
+static bool rawInvalidate(uint32_t handle)
 {
     __try {
         void* rs = g_getRawStreamerFn();
@@ -72,84 +90,100 @@ bool rawInvalidate(uint32_t handle)
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-// Register one new file mid-session, same call and flags as the startup pass. SEH: a fault here
-// must not take the game down; worst case the file just is not picked up.
-// Returns the confirmed outcome:
-//   0 direct  1 rejected  2 no handle  3 fault  4 occupied takeover  5 waiting for target
-int liveRegister(Ov& ov)
+static void applyRegister(LiveOp& op)
 {
-    __try {
-        uint32_t id = 0xFFFFFFFF;
-        o_regRaw(&id, ov.gfile ? ov.gfile : ov.file, g_b1, ov.slot, g_b2);
-        ov.id = id;
-        if (id == 0xFFFFFFFF) {
-            int occupied = recoverOccupiedSlot(ov);
-            return occupied == OCCUPIED_ATTACHED ? 4 :
-                   occupied == OCCUPIED_WAITING ? 5 : 1;
-        }
-        if (g_mgr && g_mgr->entries && id < (uint32_t)g_mgr->numEntries)
-            ov.handle = g_mgr->entries[id].handle;
-        return ov.handle ? 0 : 2;
+    // The strings live in the op until the claim is known to stick; only then do they become the
+    // leaked copies every published override is made of.
+    Ov ov;
+    ov.slot = op.slot.c_str();
+    ov.file = op.file.c_str();
+    ClaimResult r = claimOne(ov);
+    if (r == CLAIM_REJECTED) {
+        // registerRawStreamingFile refuses a slot that already holds a handle, and the
+        // occupied-slot path could not find a raw entry for our own file either. A restart
+        // claims the slot before the server or DLC mounts.
+        LOG_WARN(LogCategory::Live, "Live reload: %s is already loaded from server/DLC and no raw entry was available; restart FiveM to claim", op.slot.c_str());
+        return;
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return 3; }
+    if (r == CLAIM_NO_HANDLE) {
+        LOG_ERROR(LogCategory::Live, "Live reload: could not register %s (no handle came back), restart to pick it up", op.slot.c_str());
+        return;
+    }
+    ov.slot = _strdup(op.slot.c_str());
+    ov.file = _strdup(op.file.c_str());
+    {
+        CsLock lk(g_cs);
+        g_ovs.push_back(ov);
+        g_bySlot[ov.slot] = ov.file;
+    }
+    if (r == CLAIM_DIRECT)
+        LOG_INFO(LogCategory::Live, "LIVE-ADD: %s <- tex_overrides/%s (id=%u handle=%08x)", ov.slot, rel(ov.file), ov.id, ov.handle);
+    else if (r == CLAIM_TAKEOVER)
+        LOG_INFO(LogCategory::Live, "LIVE-TAKEOVER: %s <- tex_overrides/%s (id=%u raw handle=%08x)", ov.slot, rel(ov.file), ov.id, ov.handle);
+    else
+        LOG_INFO(LogCategory::Live, "LIVE-WAIT: %s (raw handle=%08x; target slot attached when present)", ov.slot, ov.handle);
+    uint64_t cv = 0, cp = 0;
+    if (rscCost(op.file, &cv, &cp) && cv + cp >= (8u << 20))
+        LOG_WARN(LogCategory::Live, "  HEAVY %.1f MB in memory (likely 4K or uncompressed; shrink to fight texture loss)", (cv + cp) / 1048576.0);
 }
 
-void drainOps()   // runs on the game's main thread
+static void drainOps()   // runs on the game's main thread
 {
-    EnterCriticalSection(&g_cs);
-    // A folder copy can queue hundreds at once. Take a small bounded shard: PeekMessageW runs
-    // every frame, so the rest lands on the next few instead of one giant stall on the game
-    // thread that a player experiences as a freeze.
+    // A folder copy can queue hundreds at once. Take a small bounded shard: the pump runs every
+    // frame, so the rest lands on the next few instead of one giant stall on the game thread
+    // that a player experiences as a freeze.
     std::vector<LiveOp> ops;
-    for (int i = 0; i < 8 && !g_opQ.empty(); ++i) { ops.push_back(g_opQ.front()); g_opQ.pop_front(); }
-    LeaveCriticalSection(&g_cs);
-    for (auto& op : ops) {
-        if (op.kind == 0) {
-            int why = liveRegister(op.ov);
-            if (why == 0 || why == 4 || why == 5) {
-                EnterCriticalSection(&g_cs);
-                g_ovs.push_back(op.ov); g_bySlot[op.ov.slot] = op.ov.file;
-                LeaveCriticalSection(&g_cs);
-                if (why == 0)
-                    LOG_INFO(LogCategory::Live, "LIVE-ADD: %s <- tex_overrides/%s (id=%u handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
-                else if (why == 4)
-                    LOG_INFO(LogCategory::Live, "LIVE-TAKEOVER: %s <- tex_overrides/%s (id=%u raw handle=%08x)", op.ov.slot, rel(op.ov.file), op.ov.id, op.ov.handle);
-                else
-                    LOG_INFO(LogCategory::Live, "LIVE-WAIT: %s (raw handle=%08x; target slot attached when present)", op.ov.slot, op.ov.handle);
-                uint64_t cv = 0, cp = 0;
-                if (rscCost(op.ov.file, &cv, &cp) && cv + cp >= (8u << 20))
-                    LOG_WARN(LogCategory::Live, "  HEAVY %.1f MB in memory (likely 4K or uncompressed; shrink to fight texture loss)", (cv + cp) / 1048576.0);
-            } else if (why == 1) {
-                // registerRawStreamingFile refuses a slot that already holds a handle.
-                // recoverOccupiedSlot has already tried the takeover path by here, so
-                // reaching this means we could not find a raw entry for our own file
-                // either. A restart claims the slot before the server or DLC mounts.
-                LOG_WARN(LogCategory::Live, "Live reload: %s is already loaded from server/DLC and no raw entry was available; restart FiveM to claim", op.ov.slot);
-                freeLiveOp(op);
-            } else {
-                LOG_ERROR(LogCategory::Live, "Live reload: could not register %s (%s), restart to pick it up", op.ov.slot,
-                          why == 2 ? "no handle came back" : "fault inside the game's register call");
-                freeLiveOp(op);
-            }
-        } else {
-            if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
-                // Honest about the ceiling: re-statting the entry points it at the new bytes, so
-                // the next STREAM IN reads them. It cannot touch what the game already holds in
-                // memory, and taking the item off and putting it back does not force a reload.
-                LOG_INFO(LogCategory::Live, "LIVE-UPDATE: %s reread from disk (the game keeps the copy it already loaded until you restart)", op.ov.slot);
-            else
-                LOG_WARN(LogCategory::Live, "Live reload: %s changed, could not refresh it, restart to apply", op.ov.slot);
-            free((void*)op.ov.slot);
-        }
+    {
+        CsLock lk(g_cs);
+        for (int i = 0; i < 8 && !g_opQ.empty(); ++i) { ops.push_back(std::move(g_opQ.front())); g_opQ.pop_front(); }
     }
-    EnterCriticalSection(&g_cs);
+    for (auto& op : ops) {
+        if (op.kind == LiveOp::Register) { applyRegister(op); continue; }
+        if (g_getRawStreamerFn && g_rawGetEntryFn && rawInvalidate(op.handle))
+            // Honest about the ceiling: re-statting the entry points it at the new bytes, so
+            // the next STREAM IN reads them. It cannot touch what the game already holds in
+            // memory, and taking the item off and putting it back does not force a reload.
+            LOG_INFO(LogCategory::Live, "LIVE-UPDATE: %s reread from disk (the game keeps the copy it already loaded until you restart)", op.slot.c_str());
+        else
+            LOG_WARN(LogCategory::Live, "Live reload: %s changed, could not refresh it, restart to apply", op.slot.c_str());
+    }
+    CsLock lk(g_cs);
     if (g_opQ.empty()) InterlockedExchange(&g_opsPending, 0);   // more shards may still be waiting
-    LeaveCriticalSection(&g_cs);
 }
 
-static volatile LONGLONG g_lastPumpWorkAt = 0;                  // caps work when PeekMessageW spins
+// Everything the plugin does on the game's main thread, from whichever of the two pumps is live.
+// Nothing may escape from here: it is called from inside FiveM's own frame event or the game's
+// message pump, and an exception unwinding into either ends the process.
+static void framePumpTick()
+{
+    try {
+#ifdef TEXOVERRIDE_DEV
+        // Whether this is being called at all is the single least certain thing about the frame
+        // event, so a dev build counts the calls and says so once every ten seconds.
+        static ULONGLONG devNext = 0; static long devTicks = 0;
+        ++devTicks;
+        ULONGLONG nowMs = GetTickCount64();
+        if (!devNext) devNext = nowMs + 10000;
+        if (nowMs >= devNext) { LOG_DEV(LogCategory::Live, "frame pump: %ld tick(s) in the last 10s", devTicks); devTicks = 0; devNext = nowMs + 10000; }
+#endif
+        if (g_opsPending) drainOps();
+        shotKeyTick();
+        // Once a second, on the game's own thread. grcResourceCache::GetInstance is a jump straight
+        // into GTA5.exe, and the plugin's standing rule for calls into game code is that they run
+        // where the game runs them; 0.8.14 called it from the beat thread every second instead.
+        static ULONGLONG poolNext = 0;
+        ULONGLONG poolNow = GetTickCount64();
+        if (poolNow >= poolNext) { poolNext = poolNow + 1000; poolBeat(); }
+    }
+    catch (...) {
+        static bool said = false;
+        if (!said) { said = true; LOG_ERROR(LogCategory::Live, "Live reload: out of memory on the game thread; queued changes may need a restart"); }
+    }
+}
 
-BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
+static volatile LONGLONG g_lastPumpWorkAt = 0;   // caps work when PeekMessageW spins
+
+static BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
 {
     // the first caller after install is the game's main loop (it pumps every frame);
     // only that thread ever drains, so ops always run where Cfx runs its own registrations
@@ -167,28 +201,6 @@ BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r)
     return g_origPeek(m, w, a, b, r);
 }
 
-// Everything the plugin does on the game's main thread, from whichever of the two pumps is live.
-void framePumpTick()
-{
-#ifdef TEXOVERRIDE_DEV
-    // Whether this is being called at all is the single least certain thing about the frame
-    // event, so a dev build counts the calls and says so once every ten seconds.
-    static ULONGLONG devNext = 0; static long devTicks = 0;
-    ++devTicks;
-    ULONGLONG nowMs = GetTickCount64();
-    if (!devNext) devNext = nowMs + 10000;
-    if (nowMs >= devNext) { LOG_DEV(LogCategory::Live, "frame pump: %ld tick(s) in the last 10s", devTicks); devTicks = 0; devNext = nowMs + 10000; }
-#endif
-    if (g_opsPending) drainOps();
-    shotKeyTick();
-    // Once a second, on the game's own thread. grcResourceCache::GetInstance is a jump straight
-    // into GTA5.exe, and the plugin's standing rule for calls into game code is that they run
-    // where the game runs them; 0.8.14 called it from the beat thread every second instead.
-    static ULONGLONG poolNext = 0;
-    ULONGLONG poolNow = GetTickCount64();
-    if (poolNow >= poolNext) { poolNext = poolNow + 1000; poolBeat(); }
-}
-
 // FiveM runs its own mid-session registrations on the game's main thread, and rage-nutsnbolts-five
 // exports the very event it uses to get there. Subscribing to it lands on the same thread, once a
 // frame, with no patch into the game at all - so it is tried first, and the PeekMessageW import
@@ -196,13 +208,13 @@ void framePumpTick()
 bool connectFramePump()
 {
     void* ev = cfxSymbol("rage-nutsnbolts-five.dll", "?OnMainGameFrame@@3V?$fwEvent@$$V@@A");
-    if (!ev) return false;
     // Returning true keeps the rest of the chain running: a handler that returns false stops
     // every subscriber after it, which here would be FiveM's own per-frame work.
-    return cfxConnect(ev, [] { framePumpTick(); return true; });
+    g_framePumpConnected = ev && cfxConnect(ev, [] { framePumpTick(); return true; });
+    return g_framePumpConnected;
 }
 
-bool installPump()
+static bool installPump()
 {
     uint8_t* mod = (uint8_t*)GetModuleHandleA(nullptr);
     auto dos = (IMAGE_DOS_HEADER*)mod;
@@ -229,156 +241,118 @@ bool installPump()
 }
 
 // Hand a batch to the game thread: journal first, then bound and coalesce pending work by slot.
-void submitBatch(std::vector<LiveOp>& batch)
+static void submitBatch(std::vector<LiveOp>& batch)
 {
-    // No waiting on the previous batch any more. The queue is a deque the pump drains in shards,
-    // so a new batch just joins the back; the old 10 second sleep loop blocked the watcher thread
-    // and threw the batch away for no reason other than the queue being busy.
     if (!journalWrite(batch)) {
         LOG_ERROR(LogCategory::Live, "Live reload: crash-saver journal could not be written; change not applied");
-        for (auto& op : batch) freeLiveOp(op);
         return;
     }
     size_t dropped = 0;
-    EnterCriticalSection(&g_cs);
-    try {
+    {
+        CsLock lk(g_cs);
         // find_if over the deque per incoming op: the 2,048 bound is what keeps this cheap
         for (auto& op : batch) {
-            auto same = std::find_if(g_opQ.begin(), g_opQ.end(), [&](const LiveOp& queued) {
-                return strcmp(queued.ov.slot, op.ov.slot) == 0;
-            });
+            auto same = std::find_if(g_opQ.begin(), g_opQ.end(), [&](const LiveOp& queued) { return queued.slot == op.slot; });
             if (same != g_opQ.end()) {
                 // A re-stat cannot replace a registration that has not run yet: there is no raw
                 // handle to refresh until that registration succeeds. The pending registration
                 // already points at this path and will read the newest bytes.
-                if (same->kind == 0 && op.kind == 1) continue;
-
-                freeLiveOp(*same);
-                *same = op;
-                op.ov.slot = op.ov.file = op.ov.gfile = nullptr;
+                if (same->kind == LiveOp::Register && op.kind == LiveOp::Restat) continue;
+                *same = std::move(op);
             }
-            else if (g_opQ.size() < 2048) {
-                g_opQ.push_back(op);
-                op.ov.slot = op.ov.file = op.ov.gfile = nullptr;
-            }
-            else {
-                ++dropped;
-            }
+            else if (g_opQ.size() < 2048) g_opQ.push_back(std::move(op));
+            else { ++dropped; continue; }
+            InterlockedExchange(&g_opsPending, 1);
         }
     }
-    catch (...) {
-        LOG_ERROR(LogCategory::Live, "Live reload: queue allocation failed; remaining changes need a FiveM restart");
-    }
-    if (!g_opQ.empty()) InterlockedExchange(&g_opsPending, 1);
-    LeaveCriticalSection(&g_cs);
-    for (auto& op : batch) freeLiveOp(op);
-    if (dropped) {
+    if (dropped)
         LOG_WARN(LogCategory::Live, "Live reload: queue limit reached; %zu change(s) need a FiveM restart", dropped);
-    }
-    g_journalClearAt = GetTickCount64() + 30000;   // journal outlives the apply; see CRASH SAVER above
 }
 
 // Detects what changed and queues work; the game-touching half runs later in drainOps on the
 // main thread. quiet = the baseline pass right after the watcher starts: it seeds the stamp map
 // (and still queues files that appeared during loading) without re-logging SKIP/IGNORED lines
 // the startup scan already wrote.
-void rescanTree(const std::string& base, const std::string& sub, bool quiet, std::vector<std::string>& xmls, std::vector<LiveOp>& batch)
+static void rescanTree(bool quiet, std::vector<std::string>& xmls, std::vector<LiveOp>& batch)
 {
-    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA((base + sub + "\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        std::string name = fd.cFileName;
-        if (name == "." || name == "..") continue;
-        std::string childRel = sub.empty() ? name : sub + "\\" + name;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (isDisabledFolder(name)) continue;   // startup logged it; a rename back makes its files new and they load
-            rescanTree(base, childRel, quiet, xmls, batch); continue;
-        }
+    const std::string base = g_overrideDir;
+    walkTree(base, "", [&](const WalkItem& it) {
+        // startup logged a disabled folder; a rename back makes its files new and they load
+        if (it.dir) return !isDisabledFolder(it.name);
 
-        std::string full = base + childRel;
-        Snap now{ ((uint64_t)fd.ftLastWriteTime.dwHighDateTime << 32) | fd.ftLastWriteTime.dwLowDateTime,
-                  ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow };
-        auto it = g_snap.find(full);
-        bool isNew = (it == g_snap.end()), isChanged = !isNew && (it->second.wt != now.wt || it->second.size != now.size);
+        std::string full = base + it.childRel;
+        Snap now{ it.writeTime, it.size };
+        auto seen = g_snap.find(full);
+        bool isNew = seen == g_snap.end();
+        bool isChanged = !isNew && (seen->second.wt != now.wt || seen->second.size != now.size);
         g_snap[full] = now;
-        if (!isNew && !isChanged) continue;
+        if (!isNew && !isChanged) return false;
+        bool announce = isNew && !quiet;
 
-        std::string ln = lower(name);
-        if (isIgnoredType(ln, fwd(childRel), isNew && !quiet)) continue;
-        if (sub.empty() && ln.size() > 4 && ln.compare(ln.size()-4, 4, ".xml") == 0) { if (!quiet) xmls.push_back(name); continue; }
-        if (!isOverrideExt(ln)) continue;
+        if (it.childRel == it.name && hasExt(lower(it.name), ".xml")) { if (!quiet) xmls.push_back(it.name); return false; }
+        std::string key = overrideKeyFor(it.name, it.childRel, announce);   // same rule as the startup scan
+        if (key.empty()) return false;
 
-        const char* why = nullptr;
-        std::string key = slotKeyFor(lower(fwd(childRel)), &why);   // same rule as the startup scan
-        if (key.empty()) {
-            if (isNew && !quiet) LOG_WARN(LogCategory::Scan, "SKIP %s - %s", lower(fwd(childRel)).c_str(), why ? why : "refused");
-            continue;
-        }
-        if (g_quarantine.count(key)) continue;   // crash saver: refused until _quarantine.txt is deleted
-
-        EnterCriticalSection(&g_cs);
         uint32_t handle = 0; bool known = false;
-        for (auto& ov : g_ovs) if (key == ov.slot) { known = true; handle = ov.handle; break; }
-        LeaveCriticalSection(&g_cs);
+        {
+            CsLock lk(g_cs);
+            for (auto& ov : g_ovs) if (key == ov.slot) { known = true; handle = ov.handle; break; }
+        }
 
+        std::string file = fwd(full);
         if (!known) {
-            if (!g_pumpReady) { LOG_INFO(LogCategory::Live, "Live reload: new file %s needs a game restart", key.c_str()); continue; }
-            if (cannotLoadPath(fwd(full).c_str(), key.c_str(), quiet)) continue;   // quiet skips the baseline re-log
-            { const char* nf = _strdup(fwd(full).c_str());
-              batch.push_back({ 0, { _strdup(key.c_str()), nf, toUtf8(nf) }, 0 }); }
+            if (!g_pumpReady) { LOG_INFO(LogCategory::Live, "Live reload: new file %s needs a game restart", key.c_str()); return false; }
+            if (cannotLoadPath(file, key.c_str(), quiet)) return false;   // quiet skips the baseline re-log
+            batch.push_back({ LiveOp::Register, key, file });
         }
         else if (handle && isChanged) {
             if ((handle >> 16) != 0)   // not in the game's own raw streamer; cannot re-stat it
                 LOG_WARN(LogCategory::Live, "Live reload: %s changed, restart to apply (handle %08x not raw)", key.c_str(), handle);
             else if (!g_pumpReady)
                 LOG_INFO(LogCategory::Live, "Live reload: %s changed, restart to apply", key.c_str());
-            else if (cannotLoadPath(fwd(full).c_str(), key.c_str(), false))
+            else if (cannotLoadPath(file, key.c_str(), false))
                 // the registered slot still points at this path with the OLD size cached, so the
                 // game may read a truncated slice of the new content; make that loud
                 LOG_WARN(LogCategory::Live, "Live reload: %s cannot be opened; not reread", key.c_str());
             else
-                batch.push_back({ 1, { _strdup(key.c_str()), nullptr }, handle });
+                batch.push_back({ LiveOp::Restat, key, std::string(), handle });
         }
-        else if (isNew && !quiet) {
+        else if (announce) {
             // A brand new file whose slot is already taken is a second copy of something already
             // loaded, usually an _override pack copied in mid-session. Which copy wins is decided
             // by the startup scan, so this one does nothing until the next launch. Silence here
             // is indistinguishable from a plugin that did not notice the file at all.
             LOG_INFO(LogCategory::Live, "Live reload: %s is already loaded from another folder; restart FiveM to use this copy", key.c_str());
         }
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
+        return false;
+    });
 }
 
-DWORD WINAPI WatchLoop(LPVOID)
+static void watchLoop()
 {
     std::string dir = g_overrideDir; if (!dir.empty() && dir.back() == '\\') dir.pop_back();
-    HANDLE h = FindFirstChangeNotificationA(dir.c_str(), TRUE,
+    HANDLE h = FindFirstChangeNotificationW(widen(dir).c_str(), TRUE,
         FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE);
-    if (h == INVALID_HANDLE_VALUE) { LOG_ERROR(LogCategory::Live, "Live reload: cannot watch tex_overrides (err %lu) — restart to apply changes", GetLastError()); return 0; }
+    if (h == INVALID_HANDLE_VALUE) { LOG_ERROR(LogCategory::Live, "Live reload: cannot watch tex_overrides (err %lu); restart to apply changes", GetLastError()); return; }
 
     // The frame event was subscribed back in Setup(), on the loader thread. Only the fallback
     // is left to decide here, and it patches an import, so it stays where it always was.
     bool viaEvent = g_framePumpConnected;
     g_pumpReady = viaEvent || installPump();
     { std::vector<std::string> ignore; std::vector<LiveOp> batch;
-      rescanTree(g_overrideDir, "", true, ignore, batch);   // baseline stamps; also catches files added during loading
+      rescanTree(true, ignore, batch);   // baseline stamps; also catches files added during loading
       if (!batch.empty()) submitBatch(batch); }
     LOG_INFO(LogCategory::Live, "Directory watcher active (%s)",
              !g_pumpReady   ? "edits only: new files need restart"
              : viaEvent     ? "full: edits and new files, on FiveM's own frame event"
                             : "full: edits and new files, via the message pump");
     for (;;) {
-        DWORD w = WaitForSingleObject(h, g_journalClearAt ? 1000 : INFINITE);
-        if (g_journalClearAt && GetTickCount64() >= g_journalClearAt && !g_opsPending) {
-            DeleteFileA(g_inflightPath);   // survived the risky window; nothing to quarantine
-            g_journalClearAt = 0;
-        }
+        DWORD w = WaitForSingleObject(h, journalTick(g_opsPending != 0) ? 1000 : INFINITE);
         if (w == WAIT_TIMEOUT) continue;
         if (w != WAIT_OBJECT_0) break;
         do { FindNextChangeNotification(h); } while (WaitForSingleObject(h, 500) == WAIT_OBJECT_0);   // debounce until quiet
         std::vector<std::string> xmls; std::vector<LiveOp> batch;
-        rescanTree(g_overrideDir, "", false, xmls, batch);
+        rescanTree(false, xmls, batch);
         if (!batch.empty()) submitBatch(batch);
         if (!xmls.empty()) {
             std::vector<PlColl> fresh;
@@ -386,5 +360,13 @@ DWORD WINAPI WatchLoop(LPVOID)
             if (!fresh.empty()) mergePlacement(fresh);
         }
     }
+    FindCloseChangeNotification(h);
+}
+
+DWORD WINAPI WatchLoop(LPVOID)
+{
+    // A thread that lets an exception out takes the whole process with it (std::terminate).
+    try { watchLoop(); }
+    catch (...) { LOG_ERROR(LogCategory::Live, "Live reload stopped (out of memory); restart FiveM to pick up further changes"); }
     return 0;
 }

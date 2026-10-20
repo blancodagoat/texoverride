@@ -4,13 +4,24 @@
 #include "core/utils.h"
 #include "core/settings.h"
 #include "core/cfx.h"
+#include "core/pattern.h"
 #include <windows.h>
 #include <dxgi1_4.h>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <cctype>
 
-bool vramTableSane(uint64_t* t, uint64_t* cur)   // refuse to write unless it looks like Cfx filled it
+static uint64_t* g_vramTable = nullptr;    // FiveM's budget table in GTA5.exe; null = not found or not sane
+static uint64_t  g_budget = 0;             // what we hold the table at; 0 = leave it alone
+static double    g_budgetWant = -1.0;      // from the setting: -1 auto, 0 game, else GB
+static uint64_t  g_budgetCurr = 0;         // what FiveM had set when we first looked
+static volatile LONG g_budgetFault = 0;
+static long g_budgetWrites = 0;
+static uint64_t g_vramTotal = 0;
+static uint64_t g_vramBudget = 0;
+
+static bool vramTableSane(uint64_t* t, uint64_t* cur)   // refuse to write unless it looks like Cfx filled it
 {
     __try {
         for (int i = 0; i < 80; i += 4) {
@@ -23,6 +34,16 @@ bool vramTableSane(uint64_t* t, uint64_t* cur)   // refuse to write unless it lo
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+void locateBudgetTable()
+{
+    const short PAT_VRAM[] = { 0x4C,0x63,0xC0,0x48,0x8D,0x05,-1,-1,-1,-1,0x48,0x8D,0x14 };
+    uint8_t* vram = scanModule(PAT_VRAM);
+    uint64_t* table = vram ? (uint64_t*)ripTarget(vram + 6) : nullptr;
+    if (table && vramTableSane(table, &g_budgetCurr)) g_vramTable = table;
+    else LOG_WARN(LogCategory::Audit, "Texture budget: VRAM table %s; budget adjustment disabled",
+                  vram ? "failed sanity check" : "pattern NOT FOUND");
+}
+
 // One DXGI probe, two numbers, both 0 when unknowable:
 //   g_vramTotal  — the card's physical VRAM (biggest hardware adapter)
 //   g_vramBudget — what Windows is willing to give THIS process right now. WDDM works it out
@@ -32,18 +53,18 @@ bool vramTableSane(uint64_t* t, uint64_t* cur)   // refuse to write unless it lo
 //                  intermittently frozen and paged-out". That is the exact failure the old
 //                  opt-in rule was guarding against, so this is the number to size against
 //                  rather than a fraction guessed from the card's sticker capacity.
-void probeVram()
+static void probeVram()
 {
     // dxgi loaded by FULL System32 path: a static import (or a bare-name load) binds to any
     // already-loaded ReShade/ENB proxy dxgi.dll, and a proxy missing CreateDXGIFactory1 used
     // to fail the load of this whole plugin. The full path always gets Windows' own copy.
     typedef HRESULT (WINAPI* CreateFactory_t)(REFIID, void**);
-    char dxPath[MAX_PATH + 16];
-    UINT sl = GetSystemDirectoryA(dxPath, MAX_PATH);
+    wchar_t dxPath[MAX_PATH + 16];
+    UINT sl = GetSystemDirectoryW(dxPath, MAX_PATH);
     if (sl == 0 || sl >= MAX_PATH) { LOG_WARN(LogCategory::Audit, "Texture budget: Cannot locate System32"); return; }
-    strcat_s(dxPath, "\\dxgi.dll");
-    HMODULE dx = LoadLibraryA(dxPath);
-    if (!dx) { LOG_WARN(LogCategory::Audit, "Texture budget: Cannot load %s (err %lu)", dxPath, GetLastError()); return; }
+    wcscat_s(dxPath, L"\\dxgi.dll");
+    HMODULE dx = LoadLibraryW(dxPath);
+    if (!dx) { LOG_WARN(LogCategory::Audit, "Texture budget: Cannot load %s (err %lu)", narrow(dxPath).c_str(), GetLastError()); return; }
     auto createFactory = (CreateFactory_t)GetProcAddress(dx, "CreateDXGIFactory1");
     if (!createFactory) { LOG_WARN(LogCategory::Audit, "Texture budget: dxgi.dll has no CreateDXGIFactory1"); return; }
 
@@ -74,16 +95,18 @@ void probeVram()
     f->Release();
 }
 
-uint64_t autoBudget(uint64_t current)
+static uint64_t autoBudget(uint64_t current)
 {
     uint64_t cap = g_vramBudget;
     if (!cap || (g_vramTotal && cap > g_vramTotal)) cap = g_vramTotal;   // Budget can span shared RAM
     return budgetFor(cap, current);
 }
 
-void budgetBeatImpl()
+static void budgetBeatImpl()
 {
-    if (g_vramTable[3] == g_budget) return;   // our value is standing
+    // Our value is standing, or FiveM has since set a higher one (the player raised the slider).
+    // Writing ours over that would lower the budget, which decideBudget refuses to do as well.
+    if (g_vramTable[3] >= g_budget) return;
     uint64_t old = g_vramTable[3];
     for (int i = 0; i < 80; i += 4) {         // same rows, same ratios as Cfx's own writer
         g_vramTable[i + 3] = g_budget;
@@ -96,10 +119,10 @@ void budgetBeatImpl()
                   g_budgetWrites == 1 ? "" : " (re-asserted; settings screen rewrote it)");
 }
 
-void decideBudgetImpl()
+static void decideBudgetImpl()
 {
-    if (!g_vramTable) return;              // nothing to write into; Setup already said so
-    if (g_budgetWant == 0.0) return;       // _budget.txt said leave it alone
+    if (!g_vramTable) return;              // nothing to write into; locateBudgetTable already said so
+    if (g_budgetWant == 0.0) return;       // texture_budget said leave it alone
     probeVram();
     if (g_budgetWant > 0.0) {
         g_budget = (uint64_t)(g_budgetWant * 1073741824.0);
@@ -204,8 +227,8 @@ void poolBeat()
         LOG_INFO(LogCategory::Audit, "Texture pool: %.1f GB of %.1f GB in use (%.0f%%)",
                  used / 1073741824.0, ceiling / 1073741824.0, pct);
     }
-    // Once a minute at DEBUG, so a _debug.txt session has a timeline to point at when a player
-    // says the world went low-detail at a particular moment.
+    // Once a minute at DEBUG, so the log has a timeline to point at when a player says the world
+    // went low-detail at a particular moment.
     else if (++g_poolTicks % 60 == 0)
         LOG_DEBUG(LogCategory::Audit, "Texture pool: %.1f GB of %.1f GB in use (%.0f%%)",
                   used / 1073741824.0, ceiling / 1073741824.0, pct);
@@ -219,14 +242,14 @@ void poolBeat()
 }
 
 // What the pack costs the streamer once every file in it is resident, and how that compares
-// with what the game is handing textures right now. Called from scanFinish.
-void costReport()
+// with what the game is handing textures right now. Called from scanOverrides.
+void costReport(uint64_t costVirt, uint64_t costPhys, std::vector<std::pair<uint64_t, std::string>>& big)
 {
-    if (g_costVirt + g_costPhys) {
+    if (costVirt + costPhys) {
         LOG_INFO(LogCategory::Audit, "Pack cost when fully loaded: %.1f MB texture memory + %.1f MB virtual memory",
-                 g_costPhys / 1048576.0, g_costVirt / 1048576.0);
-        std::sort(g_costBig.rbegin(), g_costBig.rend());
-        for (const auto& item : g_costBig)
+                 costPhys / 1048576.0, costVirt / 1048576.0);
+        std::sort(big.rbegin(), big.rend());
+        for (const auto& item : big)
             LOG_WARN(LogCategory::Audit, "  HEAVY %6.1f MB  %s (likely 4K or uncompressed; shrink to fight texture loss)", item.first / 1048576.0, item.second.c_str());
         // Past ~1 GB the pack no longer fits the budget, and eviction inside GTA5.exe is
         // passive-only (cfx #3874), so the pool saturates and the whole world drops to low LOD.
@@ -237,41 +260,30 @@ void costReport()
         // HEAVY list as a low-end problem and assume their hardware already covers it.
         // compare against what the game is giving RIGHT NOW; the budget line on the first beat
         // reports separately whether that ceiling then got raised
-        if (g_costPhys >= (1024ull << 20) && g_budgetCurr) {
+        if (costPhys >= (1024ull << 20) && g_budgetCurr) {
             LOG_INFO(LogCategory::Audit, "  Texture pool: Game allocation is %.1f GB. %s",
                      g_budgetCurr / 1073741824.0,
-                     g_costPhys < g_budgetCurr / 2
+                     costPhys < g_budgetCurr / 2
                        ? "Pack fits with room to spare."
                        : "Pack takes a large share of budget; shrink HEAVY files if texture loss occurs.");
         }
     }
 }
 
-// _budget.txt and the placement .xml files are user files too, so they are read out here with
-// the rest of them instead of under the loader lock. Two functions because they sit on opposite
-// sides of the scan: the budget decision needs the file before the scan starts (see
-// backgroundStartup), and the placement parse is not needed until the first beat.
+// Turns the setting into g_budgetWant. Runs before the scan, because decideBudget needs it there
+// (see backgroundStartup). A legacy _budget file is already in g_set.budget: loadSettings reads it
+// ahead of texture_budget, so it still wins, and migrateSettings has deleted it by now.
 void readBudgetFile()
 {
-    // A _budget.txt holding a number is the older way to set this and still wins, because
-    // someone who wrote one meant it. Otherwise texture_budget in _settings.txt decides.
-    std::string src = "_budget.txt", val;
-    std::string bp = ctlPath("_budget");
-    if (!bp.empty()) {
-        FILE* bf = nullptr;
-        if (!fopen_s(&bf, bp.c_str(), "rb") && bf) {
-            char buf[32] = {}; fread(buf, 1, 31, bf); fclose(bf);
-            val = lower(std::string(buf));
-        }
-    }
-    if (val.empty()) { src = "texture_budget"; val = g_set.budget; }
+    const std::string& val = g_set.budget;
     if (val.empty() || val.find("auto") == 0) return;          // auto: leave g_budgetWant at -1
 
     double gb = atof(val.c_str());
-    if (val.find("game") == 0 || val.find("off") == 0 || gb == 0.0) g_budgetWant = 0.0;
+    // only a written 0 means "leave it alone"; text atof cannot read is a typo, and says so
+    if (val.find("game") == 0 || val.find("off") == 0 || (gb == 0.0 && isdigit((unsigned char)val[0]))) g_budgetWant = 0.0;
     else if (gb >= 1.0 && gb <= 48.0) g_budgetWant = gb;
     else {
         g_budgetWant = 0.0;
-        LOG_WARN(LogCategory::Audit, "Texture budget: %s is not auto, game, or a number from 1 to 48; left at game default", src.c_str());
+        LOG_WARN(LogCategory::Audit, "Texture budget: texture_budget = %s is not auto, game, or a number from 1 to 48; left at game default", val.c_str());
     }
 }

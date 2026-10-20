@@ -1,0 +1,8 @@
+﻿CompileFlags:
+  Add:
+    - -std=c++17
+    - -Isrc
+    - -Iminhook/include
+    - -Iminhook/src
+    - -DNDEBUG
+    - -D_CRT_SECURE_NO_WARNINGS

@@ -8,10 +8,12 @@ The plugin hooks one game function, `registerRawStreamingFile`, the same routine
 register loose and server-streamed files. The byte pattern that locates it comes from Cfx's open
 source tree (`gta-streaming-five/src/Streaming.cpp`).
 
-It hooks the game module (`GTA5.exe`) only, never FiveM's own DLLs. FiveM's `legitimacy`
-anti-tamper terminates the process if you modify Cfx components; a hook in the game module is the
-same surface trainers and `PackfileLimitAdjuster.asi` use, and it survives full connected
-sessions.
+It hooks the game module (`GTA5.exe`) only, never FiveM's own DLLs. FiveM checks its own
+components against a manifest and stops with a fatal error if one has been changed, so patching
+FiveM's code is off the table. A hook in the game module is the same surface trainers and
+`PackfileLimitAdjuster.asi` use, and it survives full connected sessions. The plugin does subscribe
+to a few of FiveM's published events (once a frame, first load finished, and for `hide_overlay` the
+frame-end drawing event), but that adds an entry to a list and changes no FiveM code.
 
 Base freemode clothing lives inside `x64v.rpf` and never passes through that function, so waiting
 to intercept it would wait forever. Instead the plugin calls `registerRawStreamingFile` itself and

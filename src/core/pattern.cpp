@@ -1,8 +1,9 @@
 #include "core/pattern.h"
+#include "core/utils.h"
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
-// pattern scan over the game module's executable sections; -1 in pat = wildcard byte
 uint8_t* scanModule(const short* pat, size_t len)
 {
     HMODULE mod = GetModuleHandleA(nullptr);
@@ -28,13 +29,20 @@ uint8_t* ripTarget(uint8_t* p)
     return p + 4 + *(int32_t*)p;
 }
 
-int runningGameBuild()
+// Every slot lookup asks for this, once per override per beat under g_cs, so it is worked out
+// once. The exe does not change name while it runs.
+static int readGameBuild()
 {
-    char path[MAX_PATH] = {};
-    if (!GetModuleFileNameA(nullptr, path, MAX_PATH)) return 0;
-    for (const char* p = path; (p = strstr(p, "_b")) != nullptr; p += 2) {
+    std::string path = modulePath(nullptr);
+    for (const char* p = path.c_str(); (p = strstr(p, "_b")) != nullptr; p += 2) {
         int build = atoi(p + 2);
         if (build >= 1000 && build <= 9999) return build;
     }
     return 0;
+}
+
+int runningGameBuild()
+{
+    static const int build = readGameBuild();
+    return build;
 }

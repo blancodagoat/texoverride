@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 constexpr uint64_t budgetFor(uint64_t cap, uint64_t current)
 {
@@ -20,13 +23,11 @@ static_assert(budgetFor( 8ull << 30, 8388608000ull) == 0, "8 GB card, slider max
 static_assert(budgetFor(11ull << 30, 8388608000ull) ==  9ull << 30, "the real 11.7 GB machine, 7.8 -> 9.0");
 static_assert(budgetFor(24ull << 30, 8388608000ull) == 21ull << 30, "24 GB card, slider maxed, plenty to gain");
 
-void probeVram();
-uint64_t autoBudget(uint64_t current);
-bool vramTableSane(uint64_t* t, uint64_t* cur);
-void decideBudgetImpl();
-void decideBudget();
-void budgetBeatImpl();
-void budgetBeat();
-void poolBeat();
-void costReport();
+// Beat thread at startup, in this order (see backgroundStartup): find the table, read the
+// setting, decide. DXGI only works off the loader lock, which is why none of it is in Setup().
+void locateBudgetTable();
 void readBudgetFile();
+void decideBudget();
+void budgetBeat();   // beat thread, every second: re-assert the raised budget
+void poolBeat();     // game main thread, once a second: how full the texture pool is
+void costReport(uint64_t costVirt, uint64_t costPhys, std::vector<std::pair<uint64_t, std::string>>& big);
