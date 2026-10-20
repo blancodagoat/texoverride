@@ -1,9 +1,7 @@
 #pragma once
 
-#include <windows.h>
 #include <cstdint>
 #include <string>
-#include <vector>
 
 enum class LogLevel {
     Debug = 0,
@@ -25,9 +23,8 @@ enum class LogCategory {
 };
 
 struct Ov {
-    const char* slot = nullptr;
-    const char* file = nullptr;   // both persistent, forward-slash, lowercased
-    const char* gfile = nullptr;  // `file` as UTF-8: the only form the game may be handed
+    const char* slot = nullptr;   // the streaming key, lowercase
+    const char* file = nullptr;   // the file on disk, forward slashes, UTF-8: the form the game takes
     uint32_t id = 0xFFFFFFFF;     // global streaming index our claim landed on
     uint32_t altId = 0xFFFFFFFF;  // the index the STORE resolves this name to
     uint32_t handle = 0;          // the handle value that points at OUR file
@@ -38,20 +35,6 @@ struct Ov {
     uint32_t loadHandle = 0;      // handle in the entry while the load was in flight
     uint8_t loadEdgeSeen = 0;     // 1 if a beat caught this slot mid-load, so loadHandle is real
     uint8_t reclaimedEarly = 0;   // 1 if the slot was reclaimed before its first LOADED
-};
-
-struct Cost {
-    uint64_t cv = 0;
-    uint64_t cp = 0;
-    bool readable = true;
-    bool rsc = true;
-};
-
-struct Cand {
-    std::string slot;
-    std::string full;
-    Cost c;
-    bool prio = false;   // came out of an *_override folder, so it outranks an ordinary copy
 };
 
 struct StrEntry {
@@ -65,64 +48,12 @@ struct StrMgr {
     int numEntries;
 };
 
-struct RawEntryView {
-    uint64_t packedFileEntry;
-    uint32_t virtFlags, physFlags;
-    uint64_t timestamp;
-    const char* fileName;
-};
-static_assert(sizeof(RawEntryView) == 32, "FiveM RawEntry layout changed");
-
-struct RawEntriesView {
-    RawEntryView* memory[64];
-    uint32_t count;
-};
-
-struct PlPreset {
-    uint32_t hash;
-    float v[5]; // v = uvX uvY scaleX scaleY rotation
-};
-
-struct PlColl {
-    std::string name, src;                        // collection name, source xml (for the log)
-    uint32_t hash = 0;
-    std::vector<PlPreset> presets;                // in file order == in parse order in memory
-    uint32_t arrOff = 0, nameOff = 0, stride = 0, uvOff = 0;   // solved layout
-    bool solved = false, dead = false, notedThin = false;
-    long writes = 0;
-};
-
+// A change the watcher found, waiting for the game's main thread.
 struct LiveOp {
-    int kind; // 0 = register, 1 = re-stat
-    Ov ov;
-    uint32_t handle;
-};
-
-struct Snap {
-    uint64_t wt;
-    uint64_t size;
-};
-
-enum SlotWhy {
-    SLOT_OK = 0,
-    SLOT_NO_EXPORTS,
-    SLOT_BAD_NAME,
-    SLOT_NO_MANAGER,
-    SLOT_NO_MODULE,
-    SLOT_NO_NAME
-};
-
-enum OccupiedResult {
-    OCCUPIED_FAILED = 0,
-    OCCUPIED_ATTACHED = 1,
-    OCCUPIED_WAITING = 2
+    enum Kind { Register, Restat } kind;
+    std::string slot;
+    std::string file;      // Register: the file on disk
+    uint32_t handle = 0;   // Restat: the raw-streamer handle to refresh
 };
 
 typedef uint32_t* (*RegRaw_t)(uint32_t*, const char*, bool, const char*, bool);
-typedef void* (*GetStreamingManager_t)();
-typedef void* (*GetStreamingModule_t)(void*, const char*);
-typedef const RawEntriesView* (*GetRawEntries_t)();
-typedef uint32_t* (*FindModuleSlot_t)(void*, uint32_t*, const char*);
-typedef void* (*GetRawStreamer_t)();
-typedef uint8_t* (*RawGetEntry_t)(void*, uint16_t);
-typedef BOOL (WINAPI* PeekMsg_t)(LPMSG, HWND, UINT, UINT, UINT);

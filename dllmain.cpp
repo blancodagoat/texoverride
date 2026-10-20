@@ -4,6 +4,7 @@
 #include "core/core.h"
 #include "core/state.h"
 #include "core/logger.h"
+#include "features/crash_saver.h"
 #include "features/update.h"
 #include <windows.h>
 
@@ -13,7 +14,7 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
         g_self = h;
         DisableThreadLibraryCalls(h);
         if (SetupSafe() && !g_off) {   // synchronous: must finish before the game's entry point runs (see Setup)
-            // If the beat thread never starts, scanFinishSafe never runs, g_scanDone is never set
+            // If the beat thread never starts, backgroundStartupSafe never runs, g_scanDone is never set
             // and the first stream call sits in its 5 minute wait for nothing. Signal it and stop.
             HANDLE beat = CreateThread(nullptr, 0, BeatLoop, nullptr, 0, nullptr);
             if (beat) {
@@ -31,18 +32,9 @@ BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
         }
     }
     else if (reason == DLL_PROCESS_DETACH) {
-        // orderly exit = no crash: the live-change journal must not quarantine anything.
-        // only after crashSaverStartup has processed any leftover journal: if Setup faulted
-        // before that point, deleting here would erase the previous crash's evidence.
-        //
-        // g_journalHot is the important half. "A real crash never reaches this line" was an
-        // ASSUMPTION, and it is wrong often enough to matter: FiveM catches the fault, shows its
-        // crash dialog, uploads a report and then tears the process down, and that path can run
-        // detach for every loaded module. Deleting the journal there erases the name of the file
-        // that just killed the game, so the next launch has nothing to quarantine and dies in the
-        // same place forever. While the startup loop holds a key in the journal, leave it alone.
-        if (g_crashSaverRan && g_inflightPath[0] && !InterlockedCompareExchange(&g_journalHot, 0, 0))
-            DeleteFileA(g_inflightPath);
+        // Orderly exit, so the journal must not quarantine anything, except when the exit is
+        // FiveM tearing down after a crash. journalOnDetach tells the two apart; see there.
+        journalOnDetach();
     }
     return TRUE;
 }

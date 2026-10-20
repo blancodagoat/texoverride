@@ -1,5 +1,6 @@
 // Checks the safety gate against src/streaming/gate.h directly.
 #include "streaming/gate.h"
+#include "core/utils.h"
 #include <string>
 #include <cstdio>
 
@@ -76,6 +77,12 @@ int main()
     DENY("onx/onx_sandy_01.ytd");
     DENY("x64/heada_000_r.ydd");        // prefix must be a whole slot name
     DENY("x64/head_abc_r.ydd");         // and the number must be a number
+
+    // hasExt takes the extension's real length; it used to assume four characters
+    want(hasExt("shop_tattoo.meta", ".meta"), true,  "hasExt .meta");
+    want(hasExt("x.ytd", ".ytd"),             true,  "hasExt four characters");
+    want(hasExt(".meta", ".meta"),            false, "hasExt needs a name before it");
+    want(hasExt("head_000_r.ydd", ".ytd"),    false, "hasExt wrong ext");
 
     printf(fails ? "%d FAILURE(S)\n" : "gate: all cases pass\n", fails);
     return fails ? 1 : 0;

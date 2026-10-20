@@ -16,9 +16,6 @@ const char* classifyCollection(const std::string& coll)
     return "Custom Server Ped";
 }
 
-// SAFETY: only human freemode-ped collections may be touched. Everything else — animal peds
-// (canine…), story/ambient peds (a_*, ig_*, cs_*), vehicles, weapons, props, maps, scripts — is
-// left strictly alone. This is what stops a "dog head replaced by a human head" mistake.
 // SAFETY: only ped collections may be touched, and only two families of them.
 //   mp_?_freemode_01*  the player's own ped
 //   a_c_*              animal peds. The eight dogs and cats that are "streamed peds" (chop,
@@ -128,14 +125,16 @@ bool isVanillaAnimalYmt(const std::string& key)
     return false;
 }
 
-// A key with a slash is a component slot ("collection/file") and its collection must be one of
-// the two families above.
+// A key with a slash is a component slot ("collection/file"): a .ydd or .ytd, in a collection that
+// is one of the two families above, or any collection that is not blocked when the file itself is
+// named like a ped part (isPedComponentFile).
 //
-// A key without one is a bare-name asset. Overlay txds (skin, tattoos, facepaint, hair, beards,
-// shirt decals...) live loose in the overlay rpfs and stream by filename alone, and a scan of
-// every *overlay*.rpf found ~100 unrelated naming families plus arbitrarily-named server packs,
-// so no name whitelist can work there. The gate is type + exactness instead: .ytd only, matching
-// the dictionary whose exact name it bears.
+// A key without one is a bare-name asset, matched by exact name. Overlay txds (skin, tattoos,
+// facepaint, hair, beards, shirt decals...) live loose in the overlay rpfs and stream by filename
+// alone, and a scan of every *overlay*.rpf found ~100 unrelated naming families plus
+// arbitrarily-named server packs, so no name whitelist can work there. The gate is type +
+// exactness instead, per type below: .ytd, .ycd, .ydr and .yft by any name, .ymt except the eight
+// vanilla animals, .ydd only for a_c_ animal models.
 bool isAllowedKey(const std::string& key)
 {
     size_t s = key.find('/');
@@ -175,7 +174,7 @@ bool isIgnoredType(const std::string& ln, const std::string& rel, bool announce)
         if (announce) LOG_INFO(LogCategory::Scan, "IGNORED %s - vanilla animal .ymt collides with game metadata; other mod files still load", rel.c_str());
         return true;
     }
-    if (ln.size() > 5 && ln.compare(ln.size()-5, 5, ".meta") == 0) {
+    if (hasExt(ln, ".meta")) {
         if (announce) LOG_INFO(LogCategory::Scan, "IGNORED %s - .meta files hold shop/menu data, not looks; see README", rel.c_str());
         return true;
     }

@@ -7,7 +7,7 @@
 // ---- streaming-cost audit ------------------------------------------------------------------
 // A .ytd/.ydd on disk is an RSC7 resource: dwords 2 (virtual) and 3 (physical) of the 16-byte
 // header encode the exact memory the streamer charges while the file is resident. Decode is
-// CodeWalker's GetSizeFromFlags (RpfFile.cs). Physical is the texture-budget hit — "texture
+// CodeWalker's GetSizeFromFlags (RpfFile.cs). Physical is the texture-budget hit; "texture
 // loss" on heavy servers is that budget running dry, so the scan totals what the pack costs
 // and names the heavy files. Threshold: 8 MB catches any 4K texture and 2K uncompressed;
 // vanilla clothing txds sit well under 2 MB.
@@ -27,10 +27,10 @@ uint64_t rscSizeFromFlags(uint32_t f)
     return (0x200ull << (f & 0xF)) * pages;
 }
 
-bool rscCost(const char* path, uint64_t* virt, uint64_t* phys)
+bool rscCost(const std::string& path, uint64_t* virt, uint64_t* phys)
 {
-    FILE* fp = nullptr;
-    if (fopen_s(&fp, path, "rb") || !fp) return false;
+    FILE* fp = openFile(path, "rb");
+    if (!fp) return false;
     uint32_t h[4] = {};
     size_t got = fread(h, sizeof(uint32_t), 4, fp);
     fclose(fp);
@@ -40,13 +40,13 @@ bool rscCost(const char* path, uint64_t* virt, uint64_t* phys)
     return true;
 }
 
-Cost readCost(const char* path)
+static Cost readCost(const std::string& path)
 {
-    Cost c = { 0, 0, true, true };
+    Cost c;
     if (rscCost(path, &c.cv, &c.cp)) return c;
     c.rsc = false;
     WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fad)) { c.readable = false; return c; }
+    if (!GetFileAttributesExW(widen(path).c_str(), GetFileExInfoStandard, &fad)) { c.readable = false; return c; }
     c.cp = (((uint64_t)fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;   // on-disk stand-in
     return c;
 }
@@ -71,14 +71,14 @@ bool cannotLoad(const char* key, const Cost& c, bool quiet)
     return false;
 }
 
-bool cannotLoadPath(const char* path, const char* key, bool quiet)
+bool cannotLoadPath(const std::string& path, const char* key, bool quiet)
 {
     return cannotLoad(key, readCost(path), quiet);
 }
 
 // The header reads ARE the cost of a big pack: one file open each, every one of them a disk
 // seek and an antivirus look. They do not touch each other, so spread them over a few threads.
-// This may only ever run OFF the loader lock (see scanFinish): a thread created inside DllMain
+// This may only ever run OFF the loader lock (see scanOverrides): a thread created inside DllMain
 // cannot start until that lock is free, so joining one there deadlocks the launch. 0.7.3 did
 // exactly that and hung on "Launching FiveM".
 struct CostJob { std::vector<Cand>* v; volatile LONG next; };
@@ -88,7 +88,7 @@ static DWORD WINAPI costWorker(LPVOID p)
     for (;;) {
         LONG i = InterlockedIncrement(&j->next) - 1;
         if (i < 0 || (size_t)i >= j->v->size()) return 0;
-        (*j->v)[i].c = readCost((*j->v)[i].full.c_str());
+        (*j->v)[i].c = readCost((*j->v)[i].full);
     }
 }
 

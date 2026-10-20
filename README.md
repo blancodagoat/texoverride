@@ -376,7 +376,7 @@ reproducible with the build server building twice and comparing before it publis
 ```
 src/                    modular C++ source (hook, streaming, budget, tattoo placement, live reload, gate)
 dllmain.cpp             plugin entry point (DllMain)
-build.bat               MSVC build
+build.bat               MSVC build; `build.bat dev` makes a test build with extra log lines
 texoverride.rc          FX_ASI_BUILD stamp
 minhook/                vendored MinHook, thread freezing removed
 COLLECTIONS.md          every valid collection folder name, characters and animals

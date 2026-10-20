@@ -14,11 +14,14 @@ It exists because FiveM's own client mod paths (mods/ folder, pseudo-DLC wrappin
 cannot deliver ped textures — they drain before the connect handshake, and the pseudo-DLC mount is
 non-overlay. This works at the streaming layer instead.
 
-Repo: github.com/blancodagoat/texoverride (owner blancodagoat). Single-file plugin: `dllmain.cpp`.
-Latest tag at time of writing: v0.8.7 (0.8.8 is in the changelog, not tagged yet). Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx
+Repo: github.com/blancodagoat/texoverride (owner blancodagoat). No longer one file: `dllmain.cpp` is
+just DllMain, the code lives in `src/core` (hook, beat loop, settings, log, state), `src/streaming`
+(gate, budget, RSC cost, slot lookups) and `src/features` (scan, live reload, crash saver,
+placement, hide_overlay, updater). The version is in `src/core/version.h`; the top CHANGELOG
+section says which one is current. Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx
 signature a self-built ASI lacks; level 2 disables the ASI loader).
 
-## The four override mechanisms (all in dllmain.cpp)
+## The four override mechanisms
 
 1. **Clothing** — `tex_overrides/<collection>/<file>.ydd|.ytd`. The folder names a freemode-ped
    collection (see COLLECTIONS.md, 186 valid names). Registered under `collection/file` and
@@ -36,6 +39,9 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
    same convention. The prefix is what separates weapon drawables from vehicle parts, prop
    drawables, building pieces and any other `.ydr` in the game. Texture dicts (`.ytd`) for weapons
    go through mechanism 2 and already worked before 0.8.8.
+   **Widened in 0.8.9:** the `w_` rule is gone. Any `.ydr` or `.yft` name is taken at the root
+   (props too), matched exactly, because the name IS the slot (`isAllowedKey`, asserted in
+   tools/test_gate_keys.cpp). The paragraph above is the 0.8.8 history, not the current gate.
    **UNVERIFIED: whether a VANILLA weapon slot can be claimed.** The PR's README text asserted it
    could, citing the animations rule, which actually says the opposite (a file that shipped with
    GTA never passes through `registerRawStreamingFile`, which is why the plugin CALLS it itself for
@@ -55,13 +61,13 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
   what the folder list was really buying. Story/cutscene peds stay refused by prefix
   (`isBlockedCollection`: cs_ csb_ ig_ hc_ player_ non-freemode mp_ ...), so the README promise
   holds. Server peds seen in the field: canine, caninepd, caninesd, caninefd, blackcat, browncat.
-- Root files: `.ytd` any name; `.ycd` any name; `.ydr` name must start with `w_`; `.ymt` any name
+- Root files: `.ytd` any name; `.ycd` any name; `.ydr`/`.yft` any name (0.8.9); `.ymt` any name
   except the 8 vanilla animal names. Placement `.xml`: fingerprint match required (below).
 - The safety gate exists because filename-alone matching would cross-wire unrelated items. Keep it.
 - **Log levels are a user contract, not a tidiness knob** (0.8.8, chocomintw's framework in #12,
   combined with our collection-map fix). `logMessage(level, category, ...)` behind LOG_INFO/WARN/
-  ERROR/DEBUG, one lock (`g_logCs`) because the hook runs on more than one thread, and DEBUG off
-  unless `_debug.txt` exists in tex_overrides. The rule: **anything the README's log table
+  ERROR/DEBUG, one lock (`g_logCs`) because the hook runs on more than one thread. Since 0.8.26
+  the log always carries DEBUG (the `debug` option and `_debug.txt` are gone). The rule: **anything the README's log table
   documents has to be INFO**, because the log is a support tool for players, not a dev trace. #12
   had REDIRECT, PLACEMENT and RECLAIM at DEBUG; those are the three "did my file actually get
   used" confirmations, one per override mechanism, and behind a debug switch nobody knows about
@@ -74,8 +80,8 @@ signature a self-built ASI lacks; level 2 disables the ASI loader).
   folder whitelist in 0.8.5. What WAS broken is the label, and that is fixed: the tag now comes
   from the collection (isPedCollection / isBlockedCollection / "depends on the file names inside")
   instead of from `isAllowedKey` on whichever file streamed first, root files are listed under a
-  `file:` heading instead of being pushed through `collectionOf`, and the 500 cap announces itself
-  rather than truncating in silence.
+  `file:` heading instead of being pushed through `collectionOf`. The 500 line cap is gone since
+  0.8.26; collections are never capped.
 - **`.ymt`: refused for the 8 vanilla animal names, allowed for everything else** (0.8.5).
   SETTLED, do not reopen. The mechanism is finally known: a `.ymt` whose name the game has NEVER
   seen registers fine (a live server pushes ~12 of its own clothing-pack `.ymt`s through the same
@@ -97,6 +103,14 @@ FiveM's DLLs (a game-module hook is the same surface trainers use). The rule sta
 REASON was misattributed until 2026-08-21: `legitimacy` is Discord/Discourse/Steam/ROS auth, not
 anti-tamper. The real gate is the component manifest mismatch fatal in `DllGameComponent.Win32.cpp`. Byte pattern from Cfx's open source
 (`gta-streaming-five/src/Streaming.cpp`). Flags passed to it are constants `(true, false)`.
+
+The ONE exception to "never touch FiveM's DLLs", and it is data, not code: `src/core/cfx.cpp`
+splices nodes into Cfx `fwEvent` lists (OnMainGameFrame and OnFirstLoadCompleted in
+rage-nutsnbolts-five, OnPostFrontendRender in rage-graphics-five). Subscribing is a single atomic
+prepend made from `Setup()`, before any Cfx component is inserting. `hide_overlay` (0.8.16+, off by
+default, the user's own feature) also moves font-renderer's and citizen-mod-loader's handler nodes
+off OnPostFrontendRender and back, from the render thread inside our own handler, which is the only
+thread that walks that list. No Cfx code is patched anywhere. Keep it that way.
 
 Base freemode clothing lives in `x64v.rpf` and never passes through that function, so the plugin
 CALLS `registerRawStreamingFile` itself to claim slots, then re-asserts the handle once a second:
@@ -180,19 +194,24 @@ LoadStreamingFile.cpp ~1968); brand-new files register mid-session.
 THREADING (the load-bearing part): RAGE's RegisterObject → module->Register inserts into name
 tables with NO lock (verified in GameSource streaminginfo.cpp:4274), and the game main thread
 reads them constantly — which is why Cfx does mid-session registration on OnMainGameFrame. We
-reach the same thread via an IAT shim on the game exe's PeekMessageW import (the main loop pumps
-it every frame; Cfx's ZOffThreadWindowing IAT-hooks the same import). Watcher queues LiveOps,
-h_peekMsg drains them on the first-caller thread only. Never move register/re-stat back onto the
-watcher thread. (Historical: rage-allocator-five's ThreadAttachment.cpp stamps allocator TLS into
+subscribe to that same event (rage-nutsnbolts-five exports it); only if it is missing do we fall
+back to an IAT shim on the game exe's PeekMessageW import (the main loop pumps it every frame;
+Cfx's ZOffThreadWindowing IAT-hooks the same import). Watcher queues LiveOps, the main thread
+drains them. Never move register/re-stat back onto the watcher thread. Both the startup claim and
+live reload go through ONE function, `claimOne` (src/streaming/streaming.cpp): before-lookup,
+`o_regRaw`, handle readback, occupied-slot fallback. They drifted apart once (live lost the alias
+pin); keep them on the one path. (Historical: rage-allocator-five's ThreadAttachment.cpp stamps allocator TLS into
 every new thread on DLL_THREAD_ATTACH once the game boots — was the fallback plan, not needed.)
 
-CRASH SAVER: covers BOTH paths since 0.8.1. Startup registration journals ONE key at a time
-(`journalOne`) around each `o_regRaw` call, so a fault inside the game's own register function
+CRASH SAVER: covers BOTH paths since 0.8.1, all of it in src/features/crash_saver.cpp. Startup
+registration journals ONE key at a time (`journalBegin`/`journalOne`/`journalEnd`, one handle held
+open across the loop) around each claim, so a fault inside the game's own register function
 quarantines exactly the file it was holding; the journal is deleted when the loop finishes. Live
-batches journal to tex_overrides\_inflight.txt before the game thread touches them;
-journal persists 30s after apply. Crash inside the window → next launch appends those keys to
-_quarantine.txt, and scanDir/rescanTree refuse them until the user deletes that file. Orderly
-exit deletes the journal in DLL_PROCESS_DETACH (a real crash never runs it). New patterns used:
+batches journal to tex_overrides\_inflight.txt before the game thread touches them; the journal
+persists 30s after the batch is queued. Crash inside either window → next launch appends those keys
+to _quarantine.txt, and both scans refuse them (`overrideKeyFor`) until the user deletes that file.
+There is NO SEH around `o_regRaw` on either path (the "never SEH a state-mutating game call" rule
+below): a fault there crashes at the call site and the journal names the file. New patterns used:
 getRawStreamer + pgRawStreamer::GetEntry (both from Cfx LoadStreamingFile.cpp).
 
 ## Streaming-cost audit + budget raiser (v0.5.2 / v0.6.0)
@@ -206,22 +225,23 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   refusal makes a pack silently half apply, which reads as a broken plugin and costs more support
   than the crash. The crash it guarded is real (summer-maine-steak, twice: 64 MB graphics
   segments, then 77+ MB virtual), so if oversized-file crashes come back, `cannotLoad` in
-  dllmain.cpp is where the refusal goes. Unreadable files are still refused, since there is
+  src/streaming/rsc.cpp is where the refusal goes. Unreadable files are still refused, since there is
   nothing to load. The startup crash saver is what replaces it: whatever the bad
   file is, oversized or not, it costs one launch instead of every launch.
 - **Cost audit (0.5.2)**: every .ytd/.ydd on disk is an RSC7 resource; header dwords 2/3
   (system/graphics flags) encode the exact resident memory via CodeWalker's `GetSizeFromFlags`
-  (`rscSizeFromFlags` in dllmain.cpp — pages sum x (0x200 << shift)). scanDir totals it, logs
+  (`rscSizeFromFlags` in src/streaming/rsc.cpp — pages sum x (0x200 << shift)). scanOverrides totals it, logs
   `pack cost when fully loaded` + `HEAVY` lines for files >= 8 MB (catches 4K anything and 2K
   uncompressed; vanilla clothing txds are under 2 MB).
 - **Budget raiser (0.6.0 opt-in, AUTO by default since 0.7.0)**: the budget is a data table in GTA5.exe — 20 rows x 4 uint64
   (half / 1.5th / full / full per texture-quality tier). FiveM fills it in
   PatchExtendedBudgeting.cpp (3 GB x slider multiplier, slider = vid_budgetScale, console-locked
-  in production) and rewrites it on settings changes. `_budget.txt` in tex_overrides (a number of
-  GB) -> pattern `4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14` (address at +6, Cfx's own), sanity check
+  in production) and rewrites it on settings changes. `texture_budget` in `_settings.txt` (auto,
+  game, or a number of GB; a legacy `_budget.txt` is migrated into it and still wins) -> pattern `4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14` (address at +6, Cfx's own), sanity check
   the row shape before any write (`vramTableSane`, SEH), clamp to DXGI dedicated VRAM, then
-  re-assert each beat (`budgetBeat`). Aligned 8-byte data writes only; fault disables just this
-  feature.
+  re-assert each beat (`budgetBeat`), but never over a HIGHER value FiveM has since written (the
+  player raised the slider): lowering it is refused at decision time and at re-assert alike.
+  Aligned 8-byte data writes only; fault disables just this feature.
   **The "no silent default" rule was reversed by the user 2026-08-20** after reports that texture
   loss hits high-end PCs identically. It does, and the reason is that FiveM's ceiling has NO VRAM
   term: `SetGamePhysicalBudget(3 * GB)` x `(vid_budgetScale/12 + 1)`, where **`GB` in that file is
@@ -247,7 +267,8 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   whichever module the fault address lands in, not the trigger. `decideBudget()` now runs it from
   the top of `BeatLoop`, the first code off the lock, and is SEH-wrapped since 0.7.2 (out there a
   fault kills the game, not just the plugin). Probed ONCE there, not per beat. See the `ponytail:` note on `autoBudget` for the upgrade
-  path if alt-tabbing turns into stutter reports. `_budget.txt` still overrides; `0` in it disables.
+  path if alt-tabbing turns into stutter reports. `texture_budget = game` (or `0`) disables; text it
+  cannot read is warned about and treated as `game`.
 
 ## Paths handed to the game MUST be UTF-8 (0.8.3, a total-failure bug)
 
@@ -258,9 +279,13 @@ non-ASCII letter in the Windows username and the ANSI bytes are invalid UTF-8, g
 U+FFFD, the path stops existing, and EVERY claim returns `id=4294967295 handle=00000000` with a
 log that looks perfectly healthy. Reported in issue #2 on a Turkish username, 424/424 files
 failing; the reporter (akaloi) proved it with a second Windows account with an ASCII name.
-`Ov::gfile` holds the UTF-8 form and is the ONLY form `o_regRaw` is ever given; `Ov::file` stays
-ANSI for our own file I/O, which is correct on the user's code page. Pure-ASCII paths share one
-string. Anything new handed to the game takes `gfile`. Hits any username with á é ö ü ł ñ or CJK.
+0.8.3 fixed it by converting ANSI to UTF-8 for the game, which still lost every letter outside the
+user's code page (a Cyrillic name on a Western Windows came back from GetModuleFileNameA as `?`,
+so the plugin could not find its own folder), and the redirect path in the hook kept handing the
+game the ANSI form. Now EVERY path inside the plugin is UTF-8, and only the helpers in
+src/core/utils (`widen`, `narrow`, `modulePath`, `openFile`, `deleteFile`, `fileExists`,
+`walkTree`) call the wide Win32 APIs. So `Ov::file` is both what we open and what the game gets.
+Never add an `...A` file API call; tools/test_parsers.cpp round-trips a Cyrillic+Latin folder.
 
 ## The crash saver, and why 0.8.1's version never fired
 
@@ -272,7 +297,9 @@ Two halves, both needed:
   claiming "a real crash never reaches this line". FALSE: FiveM catches the fault, shows its crash
   dialog, uploads, then tears the process down, and that path runs detach. The plugin was erasing
   the name of the file that had just killed the game, so the next launch crashed identically
-  forever. `g_journalHot` blocks the delete while the startup loop owns the journal (0.8.2).
+  forever. `journalOnDetach` keeps the journal while the startup loop owns it (0.8.2) AND while a
+  live batch is inside its 30s window (the live half was missing until after 0.8.28). Price:
+  quitting within 30s of a live add quarantines that file once, loudly.
 CONFIRMED WORKING IN THE FIELD: a player's 0.8.4 log opens with
 `QUARANTINED a_c_shepherd.ymt`, then boots and runs. Do not "simplify" the detach guard away.
 
@@ -339,11 +366,15 @@ parse `<PedDecorationCollection>` presets. Game install: `D:\Steam\steamapps\com
   worth something if the binary is actually checkable. Do not drop the flag or the CI step.
   **NEVER `sed -i` build.bat**: it strips the CRLF line endings that batch `for /f` needs and the
   build dies with "'M' is not recognized". Edit it byte-wise (python, `open(p,'rb')`).
+- `build.bat dev` replaced builddev.bat: same build plus `/DTEXOVERRIDE_DEV` (LOG_DEV lines),
+  written to texoverride-dev.asi so it can never be mistaken for the release.
+- CI checks version.h against the four numbers in texoverride.rc on every push, and against the
+  tag and the top CHANGELOG heading on a tag build.
 - `build.bat` — MSVC (VS Build Tools 2022, "Desktop development with C++"). `/MT /EHsc /std:c++17`,
   no /clr. The user's shell prints `fastfetch`/`vswhere` noise and exits nonzero even on success;
   trust the `Built texoverride.asi` line, not the exit code.
 - `.asi` is gitignored — CI builds it and attaches it to the GitHub Release. Never commit the .asi.
-- Release: bump `TEXOVERRIDE_VERSION` in dllmain.cpp AND `FILEVERSION`/`PRODUCTVERSION`/the two
+- Release: bump `TEXOVERRIDE_VERSION` in src/core/version.h AND `FILEVERSION`/`PRODUCTVERSION`/the two
   version strings in `texoverride.rc` (they must match), date the CHANGELOG section, commit, push,
   `git tag vX.Y.Z`, push the tag. CI builds both the push and the tag; the tag build makes the
   release with the changelog notes + the .asi.

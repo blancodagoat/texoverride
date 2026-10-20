@@ -3,6 +3,7 @@
 #include "core/logger.h"
 #include "core/settings.h"
 #include "core/state.h"
+#include "core/utils.h"
 #include <windows.h>
 #include <string>
 #include <vector>
@@ -136,9 +137,7 @@ void connectShotGate()
     for (size_t a = 0; a <= g_set.hideOverlay.size(); ) {
         size_t b = g_set.hideOverlay.find(',', a);
         if (b == std::string::npos) b = g_set.hideOverlay.size();
-        std::string t = g_set.hideOverlay.substr(a, b - a);
-        while (!t.empty() && t.front() == ' ') t.erase(t.begin());
-        while (!t.empty() && t.back()  == ' ') t.pop_back();
+        std::string t = trim(g_set.hideOverlay.substr(a, b - a));
         a = b + 1;
         if (t.empty()) continue;
         if (t == "always") { InterlockedExchange64(&g_hideUntil, 0x7FFFFFFFFFFFFFFFLL); g_keys.push_back(0); continue; }   // 0 = placeholder, never polled

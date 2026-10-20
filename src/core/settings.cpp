@@ -60,14 +60,6 @@ auto_update = no
 hide_overlay = no
 )";
 
-static std::string trim(const std::string& s)
-{
-    size_t a = s.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return std::string();
-    size_t b = s.find_last_not_of(" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
-
 // Generous on purpose: people write yes, on, true, 1, enabled. Anything else is off, which is
 // the safe direction for every option here.
 static bool truthy(const std::string& v)
@@ -159,8 +151,7 @@ static void markerBudget()
     std::string p = ctlPath("_budget");
     if (p.empty()) return;
     std::string v;
-    FILE* f = nullptr;
-    if (!fopen_s(&f, p.c_str(), "rb") && f) {
+    if (FILE* f = openFile(p, "rb")) {
         char buf[32] = {};
         fread(buf, 1, 31, f);
         fclose(f);
@@ -189,8 +180,8 @@ void loadSettings()
 
     std::string p = ctlPath("_settings");
     if (p.empty()) return;
-    FILE* f = nullptr;
-    if (fopen_s(&f, p.c_str(), "rb") || !f) return;
+    FILE* f = openFile(p, "rb");
+    if (!f) return;
 
     char line[512];
     while (fgets(line, sizeof line, f)) {
@@ -206,8 +197,8 @@ void loadSettings()
 
 static bool writeDefault()
 {
-    FILE* f = nullptr;
-    if (fopen_s(&f, (std::string(g_overrideDir) + "_settings.txt").c_str(), "wb") || !f) return false;
+    FILE* f = openFile(std::string(g_overrideDir) + "_settings.txt", "wb");
+    if (!f) return false;
     fputs(kDefaultSettings, f);
     fclose(f);
     return true;
@@ -231,8 +222,8 @@ void migrateSettings()
     std::string path = ctlPath("_settings");
     std::vector<std::string> lines;
     {
-        FILE* f = nullptr;
-        if (fopen_s(&f, path.c_str(), "rb") || !f) return;
+        FILE* f = openFile(path, "rb");
+        if (!f) return;
         char buf[512];
         while (fgets(buf, sizeof buf, f)) lines.push_back(buf);
         fclose(f);
@@ -258,8 +249,8 @@ void migrateSettings()
     for (size_t i = 0; i < g_markers.size(); ++i)
         if (!placed[i]) lines.push_back(g_markers[i].key + " = " + g_markers[i].value + "\n");
 
-    FILE* f = nullptr;
-    if (fopen_s(&f, path.c_str(), "wb") || !f) {
+    FILE* f = openFile(path, "wb");
+    if (!f) {
         LOG_WARN(LogCategory::Core, "Could not write _settings.txt; the old settings files are left alone");
         return;
     }
@@ -271,10 +262,10 @@ void migrateSettings()
 
     for (auto& m : g_markers) {
         if (isDead(m.key)) {
-            if (DeleteFileA(m.path.c_str()))
+            if (deleteFile(m.path))
                 LOG_INFO(LogCategory::Core, "Deleted %s; that option no longer exists", rel(m.path.c_str()));
         }
-        else if (DeleteFileA(m.path.c_str()))
+        else if (deleteFile(m.path))
             LOG_INFO(LogCategory::Core, "Moved %s into _settings.txt as \"%s = %s\" and deleted it",
                      rel(m.path.c_str()), m.key.c_str(), m.value.c_str());
         else

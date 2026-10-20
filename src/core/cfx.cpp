@@ -132,7 +132,7 @@ int cfxDetachOwned(void* fwEventObject, void** owners, void** standIns, int nOwn
             if (hit >= 0) {
 #ifdef TEXOVERRIDE_DEV
                 char f[MAX_PATH]=""; GetModuleFileNameA(o,f,MAX_PATH);
-                const char* bs=f; for(const char* q=f;*q;++q) if(*q==92) bs=q+1;
+                const char* bs=f; for(const char* q=f;*q;++q) if(*q=='\\') bs=q+1;
                 LOG_DEV(LogCategory::Core, "cfxDetachOwned: took off order=%d owner=%s", n->order, bs);
 #endif
                 parked[nParked++] = n; ++moved;
@@ -178,7 +178,7 @@ void cfxDumpEvent(void* fwEventObject, const char* name)
         char full[MAX_PATH] = "?";
         if (m) GetModuleFileNameA(m, full, MAX_PATH);
         const char* base = strrchr(full, '/');
-        for (const char* q = full; *q; ++q) if (*q == 92) base = q;   // 92 is the backslash
+        for (const char* q = full; *q; ++q) if (*q == '\\') base = q;
         LOG_DEV(LogCategory::Core, "%s[%d] order=%d cookie=%llu handler in %s%s", name, i, n->order,
                 (unsigned long long)n->cookie, base ? base + 1 : full, m == (HMODULE)g_self ? " (OURS)" : "");
     }

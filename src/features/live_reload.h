@@ -1,18 +1,10 @@
 #pragma once
 
-#include "core/types.h"
 #include <windows.h>
-#include <string>
-#include <vector>
 
-void freeLiveOp(LiveOp& op);
-bool rawInvalidate(uint32_t handle);
-int liveRegister(Ov& ov);
-void drainOps();
-BOOL WINAPI h_peekMsg(LPMSG m, HWND w, UINT a, UINT b, UINT r);
-void framePumpTick();
-bool connectFramePump();
-bool installPump();
-void submitBatch(std::vector<LiveOp>& batch);
-void rescanTree(const std::string& base, const std::string& sub, bool quiet, std::vector<std::string>& xmls, std::vector<LiveOp>& batch);
-DWORD WINAPI WatchLoop(LPVOID);
+// Live reload: a watcher thread notices changes in tex_overrides and the game's main thread
+// applies them. See live_reload.cpp for the threading rules.
+
+bool connectFramePump();          // Setup(), on the loader thread: subscribe to OnMainGameFrame
+void locateRawStreamer();         // beat thread, with the other optional patterns
+DWORD WINAPI WatchLoop(LPVOID);   // the watcher thread

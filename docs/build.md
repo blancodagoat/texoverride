@@ -12,6 +12,13 @@ If the batch file's vcvars auto-detect fails on your machine, run the same thing
 Native Tools Command Prompt for VS 2022"; the batch skips detection when the environment is
 already set up.
 
+`build.bat dev` makes a test build instead, called `texoverride-dev.asi`. It writes extra lines
+marked `DEV` into the log, for tracking down a problem. Never hand it out as a release. To try it,
+move your normal `texoverride.asi` out of the plugins folder first and put this one in under that
+name, because two copies in the folder would both load.
+
+`tools\run_tests.bat` builds and runs the tests. CI runs them on every push before it builds.
+
 ### The build stamp
 
 FiveM refuses any `.asi` on game build 2189 or newer that does not claim support for the running

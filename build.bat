@@ -1,6 +1,18 @@
 @echo off
 REM Build texoverride.asi. Needs Visual Studio Build Tools with the "Desktop development with
 REM C++" workload. Run from a "x64 Native Tools Command Prompt", or let this find vcvars.
+REM
+REM   build.bat        the release build, texoverride.asi
+REM   build.bat dev    a DEV build, texoverride-dev.asi, with the LOG_DEV tracing compiled in.
+REM                    Never release it. The name differs on purpose so it cannot be mistaken
+REM                    for the release one.
+
+set "DEFS="
+set "OUT=texoverride.asi"
+if /i "%~1"=="dev" (
+  set "DEFS=/DTEXOVERRIDE_DEV"
+  set "OUT=texoverride-dev.asi"
+)
 
 if "%VSCMD_ARG_TGT_ARCH%"=="x64" goto build
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -27,12 +39,18 @@ REM minhook is vendored C and warns at /W4 about its own style. Compiled on its 
 REM warnings the build prints are only ever ours.
 cl /nologo /c /W0 /O2 /MT /DNDEBUG /I minhook\include ^
    minhook\src\buffer.c minhook\src\hook.c minhook\src\trampoline.c minhook\src\hde\hde64.c || exit /b 1
-cl /nologo /std:c++17 /W4 /O2 /MT /EHsc /DNDEBUG /LD /I minhook\include /I src ^
+cl /nologo /std:c++17 /W4 /O2 /MT /EHsc /DNDEBUG %DEFS% /LD /I minhook\include /I src ^
    dllmain.cpp src\core\*.cpp src\streaming\*.cpp src\features\*.cpp ^
    buffer.obj hook.obj trampoline.obj hde64.obj ^
-   texoverride.res /Fe:texoverride.asi /link /DLL user32.lib /Brepro || exit /b 1
+   texoverride.res /Fe:%OUT% /link /DLL user32.lib /Brepro || exit /b 1
 
 del /q *.obj *.res *.exp *.lib 2>nul
 echo.
+if not "%DEFS%"=="" goto devdone
 echo Built texoverride.asi
 echo Copy it to: %LOCALAPPDATA%\FiveM\FiveM.app\plugins\
+exit /b 0
+:devdone
+echo Built texoverride-dev.asi  ** DEV BUILD: extra DEV log lines, do not release **
+echo Install it AS texoverride.asi in FiveM.app\plugins (move the release one aside first).
+echo Two copies of the plugin in that folder would both load and both hook.

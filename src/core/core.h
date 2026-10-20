@@ -1,13 +1,8 @@
 #pragma once
 
-#include "core/types.h"
 #include <windows.h>
 
-uint32_t* h_regRaw(uint32_t* fileId, const char* name, bool b1, const char* asName, bool b2);
-void locateRuntimePatterns();
-void backgroundStartup();
-bool backgroundStartupCppSafe();
-void scanFinishSafe();
-DWORD WINAPI BeatLoop(LPVOID);
-void Setup();
+// DllMain's two entry points. SetupSafe runs synchronously under the loader lock and installs the
+// hook; BeatLoop is the background thread that does everything else (see core.cpp).
 bool SetupSafe();
+DWORD WINAPI BeatLoop(LPVOID);
