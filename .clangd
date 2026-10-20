@@ -1,4 +1,4 @@
-﻿CompileFlags:
+CompileFlags:
   Add:
     - -std=c++17
     - -Isrc

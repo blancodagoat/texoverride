@@ -1,4 +1,4 @@
-﻿# build artifacts (attach the built .asi to a GitHub Release instead of committing it)
+# build artifacts (attach the built .asi to a GitHub Release instead of committing it)
 *.asi
 *.obj
 *.res
@@ -15,9 +15,6 @@ compile_flags.txt
 scratch/
 temp_converting/
 texoverride.zip
-
-# private working notes, never pushed
-CLAUDE.md
 
 # probe files the skin/overlay investigation drops in the repo root
 dds_*.dds
