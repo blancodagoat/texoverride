@@ -16,10 +16,10 @@ non-overlay. This works at the streaming layer instead.
 
 Repo: github.com/blancodagoat/texoverride (owner blancodagoat). Since 2026-08-25 (PR #17) the
 plugin is a `src/` tree (`core/`, `streaming/`, `features/`) with a 48-line `dllmain.cpp`; the
-old single file is history at `e638d45`. Latest tag: v0.8.27 (2026-09-12, GTA World collection
-folders in the zip plus repo-only work: tests in CI, /W4, Node 24 actions; no plugin code changed).
-The last release that changed the plugin is v0.8.26 (2026-09-09, force_reload removed after it
-crashed the game; see the 0.8.26 section). Everything through v0.8.27 released and pushed. Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx signature a
+old single file is history at `e638d45`. Latest tag: v0.8.28 (2026-09-13, thread-freeze code
+dropped from the vendored minhook). **main is at 0.8.29, merged 2026-10-20 (PR #21, chocomintw),
+NOT tagged and NOT tested in game**; see the 0.8.29 section. The last release that changed claim
+behaviour is v0.8.26 (2026-09-09, force_reload removed after it crashed the game). Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx signature a
 self-built ASI lacks; level 2 disables the ASI loader).
 
 **Sister tools on blancodagoat.dev/dlc-builder (2026-08-25):** "dlc.rpf to tex_overrides"
@@ -218,6 +218,13 @@ REASON was misattributed until 2026-08-21: `legitimacy` is Discord/Discourse/Ste
 anti-tamper. The real gate is the component manifest mismatch fatal in `DllGameComponent.Win32.cpp`. Byte pattern from Cfx's open source
 (`gta-streaming-five/src/Streaming.cpp`). Flags passed to it are constants `(true, false)`.
 
+The ONE exception to "never touch FiveM's DLLs", and it is data, not code: `src/core/cfx.cpp`
+splices nodes into Cfx `fwEvent` lists (OnMainGameFrame and OnFirstLoadCompleted in
+rage-nutsnbolts-five, OnPostFrontendRender in rage-graphics-five), each a single atomic prepend
+from `Setup()`, before any Cfx component is inserting. `hide_overlay` also moves font-renderer's
+and citizen-mod-loader's nodes off OnPostFrontendRender and back, from the render thread inside
+our own handler. No Cfx code is patched anywhere. Keep it that way.
+
 Base freemode clothing lives in `x64v.rpf` and never passes through that function, so the plugin
 CALLS `registerRawStreamingFile` itself to claim slots, then re-asserts the handle once a second:
 a streaming slot is name → id → handle, last handle-writer wins. FiveM's loader overwrites handles
@@ -389,7 +396,7 @@ which is the most likely reason the user's 2026-08-25 statement was true at the 
 needs a restart is taking over a name the server already streams; that is by design, below.
 
 A file added mid-session whose name the CONNECTED SERVER already streams cannot be claimed:
-`registerRawStreamingFile` refuses a slot that already holds a handle, so `liveRegister` gets
+`registerRawStreamingFile` refuses a slot that already holds a handle, so the live claim gets
 id=0xFFFFFFFF. Cfx hits the same wall and answers it by writing pgRawStreamer handles straight into
 the entry (LoadStreamingFile.cpp: `handle == 0` -> register, else overwrite + handle stack). We have
 no `pgRawStreamer::RegisterFile` pattern to mint a handle with, so the log tells the user to restart
@@ -406,10 +413,13 @@ LoadStreamingFile.cpp ~1968); brand-new files register mid-session.
 THREADING (the load-bearing part): RAGE's RegisterObject → module->Register inserts into name
 tables with NO lock (verified in GameSource streaminginfo.cpp:4274), and the game main thread
 reads them constantly — which is why Cfx does mid-session registration on OnMainGameFrame. We
-reach the same thread via an IAT shim on the game exe's PeekMessageW import (the main loop pumps
-it every frame; Cfx's ZOffThreadWindowing IAT-hooks the same import). Watcher queues LiveOps,
-the pump drains them on the game thread only. Never move register/re-stat back onto the
-watcher thread.
+subscribe to that same event; only if the export is missing do we fall back to an IAT shim on the
+game exe's PeekMessageW import (Cfx's ZOffThreadWindowing IAT-hooks the same import). Watcher
+queues LiveOps, the main thread drains them. Never move register/re-stat back onto the watcher
+thread. Since 0.8.29 the startup claim and live reload go through ONE function, `claimOne`
+(src/streaming/streaming.cpp): before-lookup, `o_regRaw`, handle readback, occupied-slot
+fallback. They drifted apart once (live lost the alias pin and kept an SEH wrapper the startup
+path had dropped); keep them on the one path.
 
 **2026-08-29: the pump is now FiveM's `OnMainGameFrame`**, with the PeekMessageW shim kept as the
 fallback when that export is missing. See the exports section: the event IS the main thread, so
@@ -441,13 +451,16 @@ notification together. It ALWAYS logs, including "nothing has changed since the 
 that reports nothing is otherwise indistinguishable from a key that does not work. (Historical: rage-allocator-five's ThreadAttachment.cpp stamps allocator TLS into
 every new thread on DLL_THREAD_ATTACH once the game boots — was the fallback plan, not needed.)
 
-CRASH SAVER: covers BOTH paths since 0.8.1. Startup registration journals ONE key at a time
-(`journalOne`) around each `o_regRaw` call, so a fault inside the game's own register function
-quarantines exactly the file it was holding; the journal is deleted when the loop finishes. Live
-batches journal to tex_overrides\_inflight.txt before the game thread touches them;
-journal persists 30s after apply. Crash inside the window → next launch appends those keys to
-_quarantine.txt, and scanDir/rescanTree refuse them until the user deletes that file. Orderly
-exit deletes the journal in DLL_PROCESS_DETACH (a real crash never runs it). New patterns used:
+CRASH SAVER: covers BOTH paths since 0.8.1, all of it in src/features/crash_saver.cpp (its state
+is private there since 0.8.29). Startup registration journals ONE key at a time
+(`journalBegin`/`journalOne`/`journalEnd`, one handle held open across the loop) around each
+claim, so a fault inside the game's own register function quarantines exactly the file it was
+holding; the journal is deleted when the loop finishes. Live batches journal to
+tex_overrides\_inflight.txt before the game thread touches them; the journal persists 30s after
+the batch is queued. Crash inside either window → next launch appends those keys to
+_quarantine.txt, and both scans refuse them (`overrideKeyFor`) until the user deletes that file.
+There is NO SEH around `o_regRaw` on either path (the "never SEH a state-mutating game call"
+rule): a fault there crashes at the call site and the journal names the file. New patterns used:
 getRawStreamer + pgRawStreamer::GetEntry (both from Cfx LoadStreamingFile.cpp).
 
 ## Streaming-cost audit + budget raiser (v0.5.2 / v0.6.0)
@@ -478,11 +491,13 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
 - **Budget raiser (0.6.0 opt-in, AUTO by default since 0.7.0)**: the budget is a data table in GTA5.exe — 20 rows x 4 uint64
   (half / 1.5th / full / full per texture-quality tier). FiveM fills it in
   PatchExtendedBudgeting.cpp (3 GB x slider multiplier, slider = vid_budgetScale, console-locked
-  in production) and rewrites it on settings changes. `_budget.txt` in tex_overrides (a number of
-  GB) -> pattern `4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14` (address at +6, Cfx's own), sanity check
+  in production) and rewrites it on settings changes. `texture_budget` in `_settings.txt` (auto,
+  game, or a number of GB; a legacy `_budget.txt` is migrated into it) -> pattern
+  `4C 63 C0 48 8D 05 ? ? ? ? 48 8D 14` (address at +6, Cfx's own), sanity check
   the row shape before any write (`vramTableSane`, SEH), clamp to DXGI dedicated VRAM, then
-  re-assert each beat (`budgetBeat`). Aligned 8-byte data writes only; fault disables just this
-  feature.
+  re-assert each beat (`budgetBeat`), but since 0.8.29 never over a HIGHER value FiveM has since
+  written (the player raised the slider): lowering is refused at decision time and at re-assert
+  alike. Aligned 8-byte data writes only; fault disables just this feature.
   **The "no silent default" rule was reversed by the user 2026-08-20** after reports that texture
   loss hits high-end PCs identically. It does, and the reason is that FiveM's ceiling has NO VRAM
   term: `SetGamePhysicalBudget(3 * GB)` x `(vid_budgetScale/12 + 1)`, where **`GB` in that file is
@@ -508,7 +523,8 @@ eviction inside GTA5.exe is passive-only, so the pool saturates at any ceiling (
   whichever module the fault address lands in, not the trigger. `decideBudget()` now runs it from
   the top of `BeatLoop`, the first code off the lock, and is SEH-wrapped since 0.7.2 (out there a
   fault kills the game, not just the plugin). Probed ONCE there, not per beat. See the `ponytail:` note on `autoBudget` for the upgrade
-  path if alt-tabbing turns into stutter reports. `_budget.txt` still overrides; `0` in it disables.
+  path if alt-tabbing turns into stutter reports. `texture_budget = game` (or `0`) disables; text
+  it cannot read is warned about and treated as `game` (0.8.29; it used to be silent).
 
 ## Paths handed to the game MUST be UTF-8 (0.8.3, a total-failure bug)
 
@@ -519,9 +535,15 @@ non-ASCII letter in the Windows username and the ANSI bytes are invalid UTF-8, g
 U+FFFD, the path stops existing, and EVERY claim returns `id=4294967295 handle=00000000` with a
 log that looks perfectly healthy. Reported in issue #2 on a Turkish username, 424/424 files
 failing; the reporter (akaloi) proved it with a second Windows account with an ASCII name.
-`Ov::gfile` holds the UTF-8 form and is the ONLY form `o_regRaw` is ever given; `Ov::file` stays
-ANSI for our own file I/O, which is correct on the user's code page. Pure-ASCII paths share one
-string. Anything new handed to the game takes `gfile`. Hits any username with á é ö ü ł ñ or CJK.
+0.8.3 fixed it by converting ANSI to UTF-8 for the game (`Ov::gfile`), which still lost every
+letter outside the user's code page (a Cyrillic name on a Western Windows came back from
+GetModuleFileNameA as `?`, so the plugin could not find its own folder), and the REDIRECT path in
+the hook kept handing the game the ANSI form. **Since 0.8.29 EVERY path inside the plugin is
+UTF-8**, and only the helpers in src/core/utils (`widen`, `narrow`, `modulePath`, `openFile`,
+`deleteFile`, `fileExists`, `walkTree`) call the wide Win32 APIs. `gfile` and `toUtf8` are gone;
+`Ov::file` is both what we open and what the game gets. Never add an `...A` file API call (the
+only ones left are `GetModuleFileNameA` on FiveM DLL names in cfx.cpp and `ShellExecuteA` on a
+URL). tools/test_parsers.cpp round-trips a Cyrillic+Latin folder.
 
 ## The crash saver, and why 0.8.1's version never fired
 
@@ -533,7 +555,9 @@ Two halves, both needed:
   claiming "a real crash never reaches this line". FALSE: FiveM catches the fault, shows its crash
   dialog, uploads, then tears the process down, and that path runs detach. The plugin was erasing
   the name of the file that had just killed the game, so the next launch crashed identically
-  forever. `g_journalHot` blocks the delete while the startup loop owns the journal (0.8.2).
+  forever. `journalOnDetach` keeps the journal while the startup loop owns it (0.8.2) AND, since
+  0.8.29, while a live batch is inside its 30s window (that half was missing, so the live crash
+  saver never fired). Price: quitting within 30s of a live add quarantines that file once, loudly.
 CONFIRMED WORKING IN THE FIELD: a player's 0.8.4 log opens with
 `QUARANTINED a_c_shepherd.ymt`, then boots and runs. Do not "simplify" the detach guard away.
 
@@ -824,6 +848,41 @@ looked completely normal, and the tag stayed on this machine, so no tag build an
 Caught with `git ls-remote --tags origin | grep vX.Y.Z`, which is the check to run every time.
 Push it explicitly: `git push origin main && git push origin vX.Y.Z`.
 
+## 0.8.29 (PR #21, chocomintw, merged 2026-10-20): review fixes + restructure. UNTAGGED.
+
+Merged in full (`0b47e53`) by user call, including the fork's 73 pre-filter-repo commits, which
+put the old CLAUDE.md history back into the public repo. The user said "idc": **CLAUDE.md is
+tracked from `97d8b24` on** (full local notes, not the PR's trimmed 593-line copy) and is no
+longer in .gitignore. Still never write a real name, email or Windows username into it.
+
+Verified before merging: all 7 test suites pass, /W4 clean, two builds byte-identical
+(`ef04b95e...` at the PR head), and the updater's forward-only URL search checked against the
+real GitHub API answer (asset keys run `name ... digest ... browser_download_url`, URL last).
+**NOT run in game.** It wants one live GTAWorld session before tagging, ideally on a non-ASCII
+Windows account, since the whole path layer moved from ANSI to wide calls.
+
+What changed, by area (the CHANGELOG section has the player wording):
+- Paths: UTF-8 everywhere (see the UTF-8 section). Fixed REDIRECT handing the game ANSI.
+- Claims: `claimOne` shared by startup and live; live lost its SEH. Hook-pattern miss now sets
+  `g_off` (it used to log "disabled" and keep running, with a null `o_regRaw` for live reload).
+- Crash saver: own API in crash_saver.cpp, one held handle, live window survives detach.
+- Placement: preset count re-checked every beat before writes. Budget: never lowers FiveM's value.
+- Updater: https only, forward-only asset search, a cut download is a failure.
+- Locks: `g_saidLock` (std::mutex, leaf, nothing called under it) around the say-once sets and
+  `s_slotWhyByExt`, which live reload reached without `g_cs`. `g_cs` taken through RAII `CsLock`.
+- Exceptions: `h_regRaw` forwards the call untouched on a C++ exception; frame pump, beat, watcher
+  and update threads catch instead of `std::terminate`.
+- Structure: single-owner globals are `static` in their file, `state.h` holds only the shared
+  ones, one `walkTree` + one `overrideKeyFor` serve both scans (walk stops 16 deep), `LiveOp` owns
+  `std::string`s, `scanModule` takes the pattern array, streaming exports retried if
+  gta-streaming-five loads late.
+- Log renames: `Occupied-slot exports` became `Slot lookup exports` + `Live reload exports`; the
+  "non-English characters" line is gone.
+
+Known edge left in, from the review: if a C++ exception (realistically only out of memory) lands
+inside `claimAll`, `journalEnd` never runs, the journal stays "hot", and the next launch
+quarantines whatever key was last in it. One false quarantine on an OOM; not worth code yet.
+
 ## What a claim ACTUALLY does (0.8.24, 2026-09-08). Four defects, all shipped fixed.
 
 Read out of two real debug logs (335 and 682 files) plus disassembly. None of it was guessable
@@ -1032,13 +1091,17 @@ lines of a real GTAW log, not the game files, so the server can change them at a
 
 ## Tests (moved out of scratch/ 2026-09-12, and CI runs them now)
 
-Five plain assert/printf harnesses in `tools/`, one runner: `cmd //d //c "call
+Seven plain assert/printf harnesses in `tools/`, one runner: `cmd //d //c "call
 .\tools\run_tests.bat"`. It does vcvars once, builds each test against one shared source
 list, and exits nonzero if any fails. The workflow runs it BEFORE the build, so a red test
 never reaches a release.
 
 - `test_gate_keys.cpp` isAllowedKey, `test_slotkey.cpp` slotKeyFor (nested folders),
-  `test_settings.cpp` 14 groups, `test_reval.cpp` the sweep, `test_ctlpath.cpp` ctlPath.
+  `test_settings.cpp` 14 groups, `test_reval.cpp` the sweep, `test_ctlpath.cpp` ctlPath,
+  `test_minhook.cpp` the vendored minhook (0.8.28), and `test_parsers.cpp` (0.8.29): the
+  updater's release scrape (zip-first asset order, digest bounds, notes fallback), RSC sizes past
+  4 GB, `joaat`, the overlays.xml reader, the classifiers, and a Cyrillic+Latin folder walked
+  through the path layer plus the depth limit.
 
 Four of the five used to live in `scratch/`, which is gitignored, so they were not in the
 repo and CI had never run one. The fifth WAS tracked and had been failing since 0.8.8: it
@@ -1062,11 +1125,16 @@ tag time, in CI, for nobody.
   worth something if the binary is actually checkable. Do not drop the flag or the CI step.
   **NEVER `sed -i` build.bat**: it strips the CRLF line endings that batch `for /f` needs and the
   build dies with "'M' is not recognized". Edit it byte-wise (python, `open(p,'rb')`).
-- `builddev.bat` — the same compile plus `/DTEXOVERRIDE_DEV`, which turns on `LOG_DEV` tracing
-  (`src/core/logger.h`): one line per new mechanism, so a local session can prove the frame pump
-  is ticking, which symbols resolved, when OnFirstLoadCompleted fired, and every refresh keypress.
-  `LOG_DEV` compiles to `((void)0)` without the define, so dev lines can never reach a release
-  build. NEVER ship the .asi builddev.bat produces.
+- `build.bat dev` (replaced `builddev.bat` in 0.8.29) — the same compile plus
+  `/DTEXOVERRIDE_DEV`, which turns on `LOG_DEV` tracing (`src/core/logger.h`): one line per new
+  mechanism, so a local session can prove the frame pump is ticking, which symbols resolved, when
+  OnFirstLoadCompleted fired. `LOG_DEV` compiles to `((void)0)` without the define, so dev lines
+  can never reach a release build. It writes `texoverride-dev.asi` so it cannot be mistaken for
+  the release; install it AS `texoverride.asi` with the release one moved aside (two copies in
+  plugins/ would both load and both hook). NEVER ship it.
+- CI (0.8.29) checks `version.h` against the four numbers in `texoverride.rc` on every push, and
+  against the tag and the top CHANGELOG heading on a tag build, so a mismatched release fails
+  before it publishes.
 - `build.bat` — MSVC (VS Build Tools 2022, "Desktop development with C++"). `/MT /EHsc /std:c++17`,
   no /clr. The user's shell prints `fastfetch`/`vswhere` noise and exits nonzero even on success;
   trust the `Built texoverride.asi` line, not the exit code.
