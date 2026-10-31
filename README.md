@@ -48,6 +48,12 @@ folders a second time.
 The plugin only works on servers that allow plugins. Some servers block them with a setting called
 "pure mode". On those servers the plugin does nothing at all.
 
+FiveM can also stay in pure mode after you leave one of those servers. It saves the setting and uses
+it every time it starts, even when you then join a server that allows plugins. If the plugin stopped
+working after you joined a pure mode server, and `texoverride.log` has stopped updating, close FiveM
+and open `FiveM.app\CitizenFX.ini`. Find the line `PureLevel` and set it to `PureLevel=0`, then start
+FiveM again.
+
 ## It says "Couldn't load texoverride.asi"
 
 That message means Windows refused the file before a single line of the plugin ran, so there is no
@@ -76,8 +82,10 @@ That message means Windows refused the file before a single line of the plugin r
    A first number that is not zero means the file loads fine on its own and something only blocks
    it inside the game, which points back at steps 2 and 3. A first number of zero means the second number
    is the Windows error code, and that names the cause.
+5. **Check your pure mode setting.** Open `FiveM.app\CitizenFX.ini`. If it says `PureLevel=1` or
+   `PureLevel=2`, set it to `PureLevel=0` and start FiveM again.
 
-Still stuck after all four? [Open a report](../../issues/new/choose), pick "Plugin will not load",
+Still stuck after all five? [Open a report](../../issues/new/choose), pick "Plugin will not load",
 and bring your answers.
 
 ## What you can replace

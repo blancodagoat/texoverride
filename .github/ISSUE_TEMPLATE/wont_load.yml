@@ -6,8 +6,7 @@ body:
     attributes:
       value: |
         This means Windows refused the file before any of the plugin's own code ran, so there is
-        no log to read. The four checks below are the whole diagnosis. Please run them first, they
-        are in the README under
+        no log to read. Please run the checks first, they are in the README under
         [It says "Couldn't load texoverride.asi"](https://github.com/blancodagoat/texoverride#it-says-couldnt-load-texoverrideasi).
   - type: input
     id: version
@@ -49,6 +48,18 @@ body:
         - Evaluation
         - Not there on my Windows version
         - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: pure
+    attributes:
+      label: PureLevel in FiveM.app\CitizenFX.ini
+      description: FiveM saves this after you join a pure mode server. Anything above 0 stops the plugin, and setting it back to 0 is the fix.
+      options:
+        - "0"
+        - "1"
+        - "2"
+        - Line is not in the file
     validations:
       required: true
   - type: textarea
