@@ -16,11 +16,24 @@ non-overlay. This works at the streaming layer instead.
 
 Repo: github.com/blancodagoat/texoverride (owner blancodagoat). Since 2026-08-25 (PR #17) the
 plugin is a `src/` tree (`core/`, `streaming/`, `features/`) with a 48-line `dllmain.cpp`; the
-old single file is history at `e638d45`. Latest tag: v0.8.28 (2026-09-13, thread-freeze code
-dropped from the vendored minhook). **main is at 0.8.29, merged 2026-10-20 (PR #21, chocomintw),
-NOT tagged and NOT tested in game**; see the 0.8.29 section. The last release that changed claim
+old single file is history at `e638d45`. Latest tag: **v0.8.29, RELEASED 2026-10-20** (PR #21,
+chocomintw), tag on `77fad47`; see the 0.8.29 section, whose "UNTAGGED" heading is out of date. In-game run
+2026-10-31 on GTAWorld, b3751, canary 38055: 352 held, 0 contested, 0 errors, but only about two
+minutes, ended by a `std::bad_alloc` thrown in `adhesive.dll` at login. No texoverride value
+anywhere on the faulting thread's stack, so not ours. The last release that changed claim
 behaviour is v0.8.26 (2026-09-09, force_reload removed after it crashed the game). Only loads on `sv_pureLevel 0` servers (level 1 needs a Cfx signature a
 self-built ASI lacks; level 2 disables the ASI loader).
+
+**FiveM now keeps a raised pure level (read from Cfx source 2026-10-31, not reproduced).** A build
+switch writes `PureLevel` to `FiveM.app\CitizenFX.ini` (3505db63c), the launcher adds `-pure_N` on
+every start, and since 019d11c3d a client above the server's level connects with no prompt and no
+restart. So one visit to a pure 1 or 2 server can stop the plugin loading on pure 0 servers
+afterwards, with no fresh log. The plugin cannot detect this, because it is not running. Answer is
+`PureLevel=0`. README and the `wont_load` issue form both cover it.
+
+**3889 exe (checked 2026-10-31).** New servers default clients to it since b5b3cb586. All 6 scan
+patterns appear verbatim in current Cfx source with no build branch beside them, so they should
+resolve there. Nobody has run the plugin on a 3889 exe. First log from one: check the pattern lines.
 
 **Sister tools on blancodagoat.dev/dlc-builder (2026-08-25):** "dlc.rpf to tex_overrides"
 converts any pack into this plugin's folder layout using a copy of `isAllowedKey` (keep the two
