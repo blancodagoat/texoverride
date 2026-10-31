@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>texoverride: your own clothes and textures in FiveM</title>
+<meta name="description" content="A FiveM plugin that shows your own clothes, tattoos, weapons and props on your screen only. Put files in one folder. It never edits game files and sends nothing to the server.">
+<meta property="og:title" content="texoverride">
+<meta property="og:description" content="Your own clothes and textures in FiveM. Only you see them.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://blancodagoat.github.io/texoverride/">
+<link rel="canonical" href="https://blancodagoat.github.io/texoverride/">
+<link rel="icon" href="data:,">
+<link rel="preload" href="fonts/geist.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="wrap nav-row">
+    <a class="wordmark" href="#top">texoverride</a>
+    <nav aria-label="On this page" class="nav-links">
+      <a href="#replace">What you can replace</a>
+      <a href="#install">Install</a>
+      <a href="#risk">Ban risk</a>
+      <a href="#trouble">Help</a>
+    </nav>
+    <div class="nav-actions">
+      <a class="btn btn-sm btn-ghost" href="https://github.com/blancodagoat/texoverride">GitHub</a>
+      <a class="btn btn-sm btn-ink" href="https://github.com/blancodagoat/texoverride/releases/latest/download/texoverride.zip">Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" id="top">
+  <div class="wrap hero-copy">
+    <h1>Your own clothes and textures in FiveM. Only you see them.</h1>
+    <p class="lead">Put your files in one folder and the game shows your versions instead of the originals. texoverride never edits the game's files and sends nothing to the server.</p>
+    <div class="cta-row">
+      <a class="btn btn-lg btn-ink" href="https://github.com/blancodagoat/texoverride/releases/latest/download/texoverride.zip">Download texoverride.zip</a>
+      <a class="btn btn-lg btn-white" href="https://github.com/blancodagoat/texoverride">Read the source</a>
+    </div>
+    <p class="fine">Free, MIT licensed. Works on servers that allow plugins (<code>sv_pureLevel 0</code>).</p>
+  </div>
+
+  <div class="mesh-stage">
+    <div class="mesh" aria-hidden="true"></div>
+    <div class="wrap">
+      <figure class="panel">
+        <div class="pane pane-tree">
+          <figcaption class="pane-name">tex_overrides/</figcaption>
+<pre><code><span class="dim"># clothes go in a folder named after the collection</span>
+mp_f_freemode_01_female_heist/
+  uppr_013_r.ydd
+
+<span class="dim"># your own folders around a pack are fine</span>
+clothingpack1/
+  mp_m_freemode_01/
+    head_000_r.ydd
+    head_diff_000_a_whi.ytd
+
+<span class="dim"># weapons and props go straight in</span>
+w_pi_pistol.ydr
+prop_beer_bottle.ydr
+
+<span class="dim"># every option, in plain English</span>
+_settings.txt</code></pre>
+        </div>
+        <div class="pane pane-log">
+          <div class="pane-name">plugins/texoverride.log</div>
+<pre><code><span class="dim">[14:10:39]</span> OVERRIDE-TAKEOVER: mp_f_freemode_01/head_000_r.ydd &lt;- tex_overrides/mp_f_freemode_01/head_000_r.ydd (id=13505 raw handle=00000045)
+
+<span class="dim">[14:04:08]</span> LOADED: mp_f_freemode_01/head_000_r.ydd from your file (0.5 MB texture, 0.2 MB virtual with dependencies)
+
+<span class="dim">[14:11:21]</span> Heartbeat (beat 6): 352 held, 0 contested, 49 reclaims (+1), 0 redirects (+0)
+
+<span class="dim">[14:11:27]</span> Texture pool: 1.1 GB of 10.0 GB in use (11%)</code></pre>
+          <p class="pane-note">Lines from real play sessions, shortened to the part you read. The log tells you whether the game used your file.</p>
+        </div>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="replace">
+  <div class="wrap split">
+    <div>
+      <p class="path">tex_overrides/</p>
+      <h2>Eight kinds of file, one folder.</h2>
+      <p class="sub">Most files go straight in under their own name. Clothes and animals go in a subfolder, and the zip already has one made for every collection, so you never have to guess a name.</p>
+      <div class="table-frame">
+        <table>
+          <thead><tr><th scope="col">What</th><th scope="col">Where it goes</th><th scope="col">Files</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Clothes</th><td>a subfolder, such as <code>mp_m_freemode_01/</code></td><td><code>.ydd .ytd</code></td></tr>
+            <tr><th scope="row">Animals</th><td>a subfolder, such as <code>a_c_husky/</code></td><td><code>.ydd .ytd .ymt</code></td></tr>
+            <tr><th scope="row">Tattoos</th><td>straight in</td><td><code>.ytd</code></td></tr>
+            <tr><th scope="row">Where a tattoo sits, and how big it is</th><td>straight in</td><td><code>.xml</code></td></tr>
+            <tr><th scope="row">Animations</th><td>straight in</td><td><code>.ycd</code></td></tr>
+            <tr><th scope="row">Firearms</th><td>straight in</td><td><code>.ydr .ytd</code></td></tr>
+            <tr><th scope="row">Props</th><td>straight in</td><td><code>.ydr .yft .ytd</code></td></tr>
+            <tr><th scope="row">Vehicles</th><td>straight in</td><td><code>.yft .ydr .ytd</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="after"><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/replacing-files.md">Step by step for each one, with examples</a></p>
+    </div>
+
+    <aside class="limits" aria-labelledby="limits-title">
+      <h3 id="limits-title">What it cannot do</h3>
+      <p><strong>Body skin and face overlays.</strong> The game builds the character from these before the plugin can reach them. Your file loads and the character still looks stock. Put these in a FiveM mods folder package instead:</p>
+      <ul class="names">
+        <li><code>mp_fm_skin_*</code></li>
+        <li><code>mp_fm_faov_*</code></li>
+        <li><code>ng_hip_faov_*</code></li>
+        <li><code>mp_eye_colour.ytd</code></li>
+      </ul>
+      <p><strong>Other players' screens.</strong> They and the server see no difference. That is the point of it, and also the limit.</p>
+      <p><strong>Instant swaps.</strong> Once the game has loaded a file it keeps it, so changing that file needs a restart. A tattoo's position is the exception.</p>
+      <p><a href="https://github.com/blancodagoat/texoverride#limitations">All the limitations</a></p>
+    </aside>
+  </div>
+</section>
+
+<section class="band band-soft" id="install">
+  <div class="wrap install">
+    <div class="install-head">
+      <p class="path">plugins/</p>
+      <h2>Unzip it and start the game.</h2>
+    </div>
+    <ol class="steps">
+      <li>
+        <span class="n">1</span>
+        <div>
+          <p>Download <a href="https://github.com/blancodagoat/texoverride/releases/latest/download/texoverride.zip">texoverride.zip</a>.</p>
+        </div>
+      </li>
+      <li>
+        <span class="n">2</span>
+        <div>
+          <p>Open File Explorer, paste this into the address bar and press Enter.</p>
+          <p class="line"><code>%LOCALAPPDATA%\FiveM\FiveM.app\plugins</code></p>
+        </div>
+      </li>
+      <li>
+        <span class="n">3</span>
+        <div>
+          <p>Unzip the download into that folder. You get <code>texoverride.asi</code> and a <code>tex_overrides</code> folder. Empty folders you do not use cost nothing.</p>
+        </div>
+      </li>
+      <li>
+        <span class="n">4</span>
+        <div>
+          <p>Put your files in <code>tex_overrides</code> and start FiveM.</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="band" id="settings">
+  <div class="wrap">
+    <p class="path">_settings.txt</p>
+    <h2>The rest of what it does.</h2>
+    <dl class="features">
+      <div class="feature feature-lead">
+        <dt>Stops textures going missing</dt>
+        <dd>Walls go black and clothes stay blurry when the game runs out of texture memory. FiveM gives a 24 GB card and an 8 GB card the same limit. The plugin raises it based on the memory Windows says your card has free. <code>texture_budget = auto</code></dd>
+      </div>
+      <div class="feature">
+        <dt>Moves tattoos while you play</dt>
+        <dd>Save an edited <code>overlays.xml</code> and the tattoo moves on your character within a second or two.</dd>
+      </div>
+      <div class="feature">
+        <dt>Survives a bad file</dt>
+        <dd>If a file crashes the game while loading, the next launch refuses it and the log names it, so one file cannot crash you again and again.</dd>
+      </div>
+      <div class="feature">
+        <dt>Lets you choose which pack wins</dt>
+        <dd>End a folder name with <code>_override</code> and it beats the same file anywhere else. Start one with <code>disabled</code> and it is skipped.</dd>
+      </div>
+      <div class="feature">
+        <dt>Keeps FiveM's corner text out of screenshots</dt>
+        <dd>The version line and mod pack counter come off your screen when you press your screenshot key. <code>hide_overlay = printscreen, f9</code></dd>
+      </div>
+      <div class="feature">
+        <dt>Tells you about updates</dt>
+        <dd>It asks GitHub for the newest version number when it starts. If you say yes, it checks the download's SHA-256 before installing. That is its only network use.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<section class="band band-ink" id="risk">
+  <div class="wrap split-even">
+    <div>
+      <p class="path">texoverride.asi</p>
+      <h2>What it does to your game, stated plainly.</h2>
+      <p class="sub">It writes about five bytes of game code to redirect one function that routes cosmetic files. It never touches health, money, weapons, position or anything else that changes play.</p>
+      <h3>Ban risk</h3>
+      <p>The risk is real. A general code scan could flag that patch whatever it is for, and FiveM's tolerance of hooks like this is practice, not a written promise. It has run full connected sessions without a ban. Only use it on servers that allow plugins.</p>
+      <h3>Your antivirus may call it a trojan</h3>
+      <p>A patch into a running game, scanning its memory and an unsigned file are what those scanners watch for. Names like <code>Wacatac.B!ml</code> mean a guess fired, not that something was found.</p>
+      <p class="after"><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/antivirus.md">Why scanners flag it</a> <span class="sep">/</span> <a href="https://github.com/blancodagoat/texoverride#ban-risk-stated-plainly">The full ban risk section</a></p>
+    </div>
+    <div class="verify">
+      <h3>Check the file yourself</h3>
+      <p>GitHub builds every release from this source and signs where it came from. If a copy from anywhere else fails this check, do not run it.</p>
+      <pre tabindex="0" aria-label="Command to verify the download"><code>gh attestation verify texoverride.asi \
+  --repo blancodagoat/texoverride</code></pre>
+      <p>Builds are also reproducible. Run <code>build.bat</code> with the free Visual Studio Build Tools and you get the same file, byte for byte.</p>
+      <p><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/build.md">Build it yourself</a></p>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="trouble">
+  <div class="wrap split-trouble">
+    <div>
+      <p class="path">plugins/texoverride.log</p>
+      <h2>Expect bugs.</h2>
+      <p class="sub">This is a working proof of concept. It will still break in ways nobody has hit yet. The log is built to say why, and it never contains your Windows user name, so it is safe to paste.</p>
+      <a class="btn btn-lg btn-ink" href="https://github.com/blancodagoat/texoverride/issues/new/choose">Report a bug</a>
+    </div>
+    <ul class="help">
+      <li><a href="https://github.com/blancodagoat/texoverride#it-says-couldnt-load-texoverrideasi">It says "Couldn't load texoverride.asi"</a><span>Windows or an antivirus blocked the file. Five checks, in order.</span></li>
+      <li><a href="https://github.com/blancodagoat/texoverride#install">It stopped working after I joined another server</a><span>FiveM may have stayed in pure mode. Set <code>PureLevel=0</code> in <code>CitizenFX.ini</code>.</span></li>
+      <li><a href="https://github.com/blancodagoat/texoverride#textures-gone-everything-stuck-on-low-detail">Textures gone, everything stuck on low detail</a><span>The game ran out of texture memory.</span></li>
+      <li><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/reading-the-log.md">My file is not showing up</a><span>What every line in the log means.</span></li>
+      <li><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/how-it-works.md">How it works</a><span>The streaming layer, and why FiveM allows this.</span></li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-row">
+    <p>Written by blancodagoat, with <a href="https://github.com/chocomintw">chocomintw</a> and <a href="https://github.com/chunguscodes">chunguscodes</a>. MIT licensed. Not affiliated with Cfx.re or Rockstar Games.</p>
+    <p class="foot-links">
+      <a href="https://github.com/blancodagoat/texoverride">GitHub</a>
+      <a href="https://github.com/blancodagoat/texoverride/releases">Releases</a>
+      <a href="https://github.com/blancodagoat/texoverride/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://blancodagoat.dev/dlc-builder">Convert a dlc.rpf pack</a>
+    </p>
+  </div>
+</footer>
+</body>
+</html>
