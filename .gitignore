@@ -13,6 +13,7 @@ compile_flags.txt
 # working files kept in the project folder on purpose (user preference: scratchpads live with
 # the project, not in %TEMP%). Multi-GB extracted game assets, throwaway tools, downloaded logs.
 scratch/
+_site/
 temp_converting/
 texoverride.zip
 

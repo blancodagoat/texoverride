@@ -27,9 +27,11 @@
       <a href="#install">Install</a>
       <a href="#risk">Ban risk</a>
       <a href="#trouble">Help</a>
+      <a href="docs/index.html">All docs</a>
     </nav>
     <div class="nav-actions">
-      <a class="btn btn-sm btn-ghost" href="https://github.com/blancodagoat/texoverride">GitHub</a>
+      <a class="btn btn-sm btn-ghost nav-docs" href="docs/index.html">Docs</a>
+      <a class="btn btn-sm btn-ghost nav-github" href="https://github.com/blancodagoat/texoverride">GitHub</a>
       <a class="btn btn-sm btn-primary" href="https://github.com/blancodagoat/texoverride/releases/latest/download/texoverride.zip">Download</a>
     </div>
   </div>
@@ -108,7 +110,7 @@ _settings.txt</code></pre>
           </tbody>
         </table>
       </div>
-      <p class="after"><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/replacing-files.md">Step by step for each one, with examples</a></p>
+      <p class="after"><a href="docs/replacing-files.html">Step by step for each one, with examples</a></p>
     </div>
 
     <aside class="limits" aria-labelledby="limits-title">
@@ -122,7 +124,7 @@ _settings.txt</code></pre>
       </ul>
       <p><strong>Other players' screens.</strong> They and the server see no difference. That is the point of it, and also the limit.</p>
       <p><strong>Instant swaps.</strong> Once the game has loaded a file it keeps it, so changing that file needs a restart. A tattoo's position is the exception.</p>
-      <p><a href="https://github.com/blancodagoat/texoverride#limitations">All the limitations</a></p>
+      <p><a href="docs/index.html#limitations">All the limitations</a></p>
     </aside>
   </div>
 </section>
@@ -206,7 +208,7 @@ _settings.txt</code></pre>
       <p>The risk is real. A general code scan could flag that patch whatever it is for, and FiveM's tolerance of hooks like this is practice, not a written promise. It has run full connected sessions without a ban. Only use it on servers that allow plugins.</p>
       <h3>Your antivirus may call it a trojan</h3>
       <p>A patch into a running game, scanning its memory and an unsigned file are what those scanners watch for. Names like <code>Wacatac.B!ml</code> mean a guess fired, not that something was found.</p>
-      <p class="after"><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/antivirus.md">Why scanners flag it</a> <span class="sep">/</span> <a href="https://github.com/blancodagoat/texoverride#ban-risk-stated-plainly">The full ban risk section</a></p>
+      <p class="after"><a href="docs/antivirus.html">Why scanners flag it</a> <span class="sep">/</span> <a href="docs/index.html#ban-risk-stated-plainly">The full ban risk section</a></p>
     </div>
     <div class="verify">
       <h3>Check the file yourself</h3>
@@ -214,7 +216,7 @@ _settings.txt</code></pre>
       <pre tabindex="0" aria-label="Command to verify the download"><code>gh attestation verify texoverride.asi \
   --repo blancodagoat/texoverride</code></pre>
       <p>Builds are also reproducible. Run <code>build.bat</code> with the free Visual Studio Build Tools and you get the same file, byte for byte.</p>
-      <p><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/build.md">Build it yourself</a></p>
+      <p><a href="docs/build.html">Build it yourself</a></p>
     </div>
   </div>
 </section>
@@ -228,11 +230,11 @@ _settings.txt</code></pre>
       <a class="btn btn-lg btn-primary" href="https://github.com/blancodagoat/texoverride/issues/new/choose">Report a bug</a>
     </div>
     <ul class="help">
-      <li><a href="https://github.com/blancodagoat/texoverride#it-says-couldnt-load-texoverrideasi">It says "Couldn't load texoverride.asi"</a><span>Windows or an antivirus blocked the file. Five checks, in order.</span></li>
-      <li><a href="https://github.com/blancodagoat/texoverride#install">It stopped working after I joined another server</a><span>FiveM may have stayed in pure mode. Set <code>PureLevel=0</code> in <code>CitizenFX.ini</code>.</span></li>
-      <li><a href="https://github.com/blancodagoat/texoverride#textures-gone-everything-stuck-on-low-detail">Textures gone, everything stuck on low detail</a><span>The game ran out of texture memory.</span></li>
-      <li><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/reading-the-log.md">My file is not showing up</a><span>What every line in the log means.</span></li>
-      <li><a href="https://github.com/blancodagoat/texoverride/blob/main/docs/how-it-works.md">How it works</a><span>The streaming layer, and why FiveM allows this.</span></li>
+      <li><a href="docs/index.html#it-says-couldnt-load-texoverrideasi">It says "Couldn't load texoverride.asi"</a><span>Windows or an antivirus blocked the file. Five checks, in order.</span></li>
+      <li><a href="docs/index.html#install">It stopped working after I joined another server</a><span>FiveM may have stayed in pure mode. Set <code>PureLevel=0</code> in <code>CitizenFX.ini</code>.</span></li>
+      <li><a href="docs/index.html#textures-gone-everything-stuck-on-low-detail">Textures gone, everything stuck on low detail</a><span>The game ran out of texture memory.</span></li>
+      <li><a href="docs/reading-the-log.html">My file is not showing up</a><span>What every line in the log means.</span></li>
+      <li><a href="docs/how-it-works.html">How it works</a><span>The streaming layer, and why FiveM allows this.</span></li>
     </ul>
   </div>
 </section>
@@ -243,9 +245,10 @@ _settings.txt</code></pre>
   <div class="wrap foot-row">
     <p>Written by blancodagoat, with <a href="https://github.com/chocomintw">chocomintw</a> and <a href="https://github.com/chunguscodes">chunguscodes</a>. MIT licensed. Not affiliated with Cfx.re or Rockstar Games.</p>
     <p class="foot-links">
+      <a href="docs/index.html">All docs</a>
       <a href="https://github.com/blancodagoat/texoverride">GitHub</a>
       <a href="https://github.com/blancodagoat/texoverride/releases">Releases</a>
-      <a href="https://github.com/blancodagoat/texoverride/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="docs/changelog.html">Changelog</a>
       <a href="https://blancodagoat.dev/dlc-builder">Convert a dlc.rpf pack</a>
     </p>
   </div>

@@ -1131,6 +1131,10 @@ deliberately NOT added: a future MSVC inventing a new warning would then break t
 tag time, in CI, for nobody.
 
 ## Build & release
+- **The website** (blancodagoat.github.io/texoverride, since 2026-10-31) is `site/` plus every repo document, built by 
+  `tools/build_site.py` in `.github/workflows/pages.yml`, so a README edit reaches it on push. Add a new document to `GROUPS`
+  there or it will not appear. A broken internal link fails the deploy. Local: `python tools/build_site.py scratch/_site`.
+  CLAUDE.md and the forum post scripts are left out on purpose.
 
 - **Builds are reproducible (0.8.6).** `/Brepro` on the link line, and CI builds twice and compares
   SHA-256 before publishing. Verified: two clean local builds are byte-identical. This is
